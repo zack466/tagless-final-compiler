@@ -10,3 +10,7 @@ git clone --recurse-submodules https://github.com/zack466/tagless-final-compiler
 
 If you have nix, just run `nix develop` and everything should work fine.
 For non-nix users, you'll have to `make` each dependency manually and add the executables to your PATH.
+
+## Docs
+
+Related reference material can be found in `docs/`.
