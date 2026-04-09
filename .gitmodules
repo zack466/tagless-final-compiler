@@ -1,0 +1,3 @@
+[submodule "deps/qbe"]
+	path = deps/qbe
+	url = git@github.com:zack466/qbe.git
