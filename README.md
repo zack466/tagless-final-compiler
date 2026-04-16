@@ -20,10 +20,10 @@ Related reference material can be found in `docs/`.
 I would recommend running `sbcl` and then loading the dev environment as follows:
 ```
 $ sbcl
-> (load "dev.lisp")
-> (in-package #:tagless-compiler)
-> (lower arith-eval  '(:mul (:add 1 2) (:inc 5))) ; -> 18
-> (lower string-repr '(:mul (:add 1 2) (:inc 5))) ; -> "(Mul (Add 1 2) (Inc 5))"
+* (load "dev.lisp")
+* (in-package #:tagless-compiler)
+* (lower arith-eval  '(:mul (:add 1 2) (:inc 5))) ; -> 18
+* (lower string-repr '(:mul (:add 1 2) (:inc 5))) ; -> "(Mul (Add 1 2) (Inc 5))"
 ```
 
 ## Libraries
