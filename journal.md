@@ -136,3 +136,8 @@ TODO
 - explicitly write out plan
 - put referenced papers into a docs/ directory
 - send link to repo when it's set up
+
+# 4/16/26
+
+TODO:
+- implement c-style language, also lambda-calculus / scheme type of language
