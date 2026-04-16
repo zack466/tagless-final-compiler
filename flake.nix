@@ -16,6 +16,14 @@
         pkgs = nixpkgs.legacyPackages.${system};
         # Access the default package from your fork's flake
         qbe = qbe-src.packages.${system}.default;
+
+        # 1. Create a custom SBCL wrapper
+        # This intercepts the 'sbcl' command and forces it to initialize
+        # ASDF securely using the current working directory ($PWD).
+        sbcl-fast = pkgs.writeShellScriptBin "sbcl" ''
+          export CL_SOURCE_REGISTRY="(:source-registry :ignore-inherited-configuration (:tree \"$PWD\"))"
+          exec ${pkgs.sbcl}/bin/sbcl "$@"
+        '';
       in
       {
         devShells.default = pkgs.mkShell {
@@ -23,6 +31,7 @@
 
           buildInputs = [
             qbe
+            sbcl-fast
           ];
         };
       }

@@ -14,3 +14,7 @@ For non-nix users, you'll have to `make` each dependency manually and add the ex
 ## Docs
 
 Related reference material can be found in `docs/`.
+
+## Libraries
+- [fset](https://gitlab.common-lisp.net/fset/fset/-/wikis/home)?
+- [alexandria](https://alexandria.common-lisp.dev/)?

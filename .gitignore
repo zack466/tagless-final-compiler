@@ -1,1 +1,5 @@
 .direnv
+*.fasl
+.DS_STORE
+*.s
+*.ssa
