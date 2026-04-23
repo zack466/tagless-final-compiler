@@ -141,3 +141,5 @@ TODO
 
 TODO:
 - implement c-style language, also lambda-calculus / scheme type of language
+
+Idea: fil-c-like transform? https://www.corsix.org/content/simplified-model-of-fil-c

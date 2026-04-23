@@ -4,8 +4,9 @@
 (defparameter *qbe* (make-interpreter))
 
 ;; Types
-(defparameter *qbe-base-types* '(:w :l :s :d))
-(defparameter *qbe-ext-types* '(:w :l :s :d :b :h :z))
+(defparameter *qbe-base-types*    '(:w :l :s :d))
+(defparameter *qbe-subw-types*    '(:sb :ub :sh :uh))
+(defparameter *qbe-ext-types*     '(:w :l :s :d :b :h :z))
 (defparameter *qbe-special-types* '(:... :env))
 
 ;; Assignment Opcodes (Returns a value)
@@ -15,13 +16,13 @@
     :alloc4 :alloc8 :alloc16
     :loadd :loads :loadl :loadsw :loaduw
     :loadsh :loaduh :loadsb :loadub :loadw
-    :ceqd :ceql :ceqs :ceqw :cged :cges :cgtd :cgts 
-    :cled :cles :cltd :clts :cned :cnel :cnes :cnew 
-    :cod :cos :csgel :csgew :csgtl :csgtw :cslel :cslew 
-    :csltl :csltw :cugel :cugew :cugtl :cugtw :culel 
+    :ceqd :ceql :ceqs :ceqw :cged :cges :cgtd :cgts
+    :cled :cles :cltd :clts :cned :cnel :cnes :cnew
+    :cod :cos :csgel :csgew :csgtl :csgtw :cslel :cslew
+    :csltl :csltw :cugel :cugew :cugtl :cugtw :culel
     :culew :cultl :cultw :cuod :cuos
-    :dtosi :dtoui :exts :extsb :extsh :extsw :extub 
-    :extuh :extuw :sltof :ultof :stosi :stoui :swtof 
+    :dtosi :dtoui :exts :extsb :extsh :extsw :extub
+    :extuh :extuw :sltof :ultof :stosi :stoui :swtof
     :uwtof :truncd
     :cast :copy :vaarg))
 
@@ -29,6 +30,33 @@
 (defparameter *qbe-effect-opcodes*
   '(:storeb :stored :storeh :storel :stores :storew
     :blit :vastart))
+
+;; -----------------------------------------------------------------------------
+;; Helpers for ABITY (BASETY | SUBWTY | :IDENT aggregate)
+;; -----------------------------------------------------------------------------
+
+(defun qbe-aggregate-type-p (x)
+  "Aggregate type: a (:user-type \"name\") form, a string, or a keyword
+   that isn't one of the reserved type keywords."
+  (or (stringp x)
+      (and (consp x) (eq (first x) :user-type))
+      (and (keywordp x)
+           (not (member x *qbe-base-types* :test #'eq))
+           (not (member x *qbe-subw-types* :test #'eq))
+           (not (member x *qbe-ext-types* :test #'eq))
+           (not (member x *qbe-special-types* :test #'eq)))))
+
+(defun qbe-abity-p (x)
+  "ABITY = base | sub-word | aggregate."
+  (or (member x *qbe-base-types* :test #'eq)
+      (member x *qbe-subw-types* :test #'eq)
+      (qbe-aggregate-type-p x)))
+
+(defun format-linkage (linkage-list)
+  "LINKAGE* -- zero or more. Accepts nil, a single symbol, or a list."
+  (cond ((null linkage-list) "")
+        ((atom linkage-list) (format nil "~(~a~) " linkage-list)) ; lowercase
+        (t (format nil "~{~a~^ ~} " linkage-list))))
 
 ;; -----------------------------------------------------------------------------
 ;; Sigils
@@ -67,42 +95,65 @@
 (def-op *qbe* :opaque (name align size)
   (format nil "type ~a = align ~a { ~a }" (lower name) align size))
 
+;; Top-level union type definition.
+;; Usage: (:union-type :myunion 8 (:union (:field :b)) (:union (:field :s)))
+(def-op *qbe* :union-type (name align &rest variants)
+  (format nil "type ~a = ~@[align ~a ~]{ ~{~a~^ ~} }"
+          (lower name)
+          align
+          (mapcar (lambda (v)
+                    (format nil "{ ~{~a~^, ~} }"
+                            (mapcar #'lower (rest v)))) ; strip :union head
+                  variants)))
+
+;; Bare union body (for embedding if needed).
+(def-op *qbe* :union (&rest variants)
+  (format nil "{ ~{~a~^ ~} }"
+          (mapcar (lambda (v) (format nil "{ ~a }" (lower v)))
+                  variants)))
+
+(def-op *qbe* :data (name linkage align &rest items)
+  ;; linkage may be nil, a single flag, or a list of flags
+  (format nil "~adata ~a = ~@[align ~a ~]{ ~{~a~^, ~} }"
+          (format-linkage linkage)
+          (lower name)
+          align
+          (mapcar #'lower items)))
+
+(def-op *qbe* :function (name linkage ret-type params &rest blocks)
+  ;; ret-type may be nil (void). `~@[...~]` suppresses the type when nil.
+  (format nil "~afunction ~@[~(~a~) ~]~a(~{~a~^, ~}) {~%~{~a~^~%~}~%}"
+          (format-linkage linkage)
+          ret-type
+          (lower name)
+          (mapcar #'lower params)
+          (mapcar #'lower blocks)))
+
 (def-op *qbe* :field (type &optional count)
+  (unless (member type *qbe-ext-types* :test #'eq)
+    (error "QBE: Invalid extended type ~S in field." type))
   (if count
       (format nil "~(~a~) ~a" type count)
       (format nil "~(~a~)" type)))
 
-(defun format-linkage (linkage-list)
-  (if linkage-list
-      (format nil "~{~a~^ ~} " (if (listp linkage-list) linkage-list (list linkage-list)))
-      ""))
-
-;; Update :data and :function to use this:
-(def-op *qbe* :data (name linkage align &rest items)
-  (format nil "~adata ~a = ~@[align ~a ~]{ ~{~a~^, ~} }"
-          (format-linkage linkage) (lower name) align (mapcar #'lower items)))
-
-(def-op *qbe* :function (name linkage ret-type params &rest blocks)
-  (format nil "~afunction ~@[~(~a~) ~]~a(~{~a~^, ~}) {~%~{~a~^~%~}~%}"
-          (format-linkage linkage) ret-type (lower name)
-          (mapcar #'lower params)
-          (mapcar #'lower blocks)))
-
 (def-op *qbe* :data-item (type &rest vals)
-  (if (string-equal (string type) "z")
-      (format nil "z ~a" (first vals))
-      (format nil "~(~a~) ~{~a~^ ~}" type vals)))
+  (unless (member type *qbe-ext-types* :test #'eq)
+    (error "QBE: Invalid extended type ~S in data-item." type))
+  (if (eq type :z)
+      (progn
+        (unless (= (length vals) 1)
+          (error "QBE: :z data-item takes exactly one size argument, got ~S." vals))
+        (format nil "z ~a" (first vals)))
+      (format nil "~(~a~) ~{~a~^ ~}" type (mapcar #'lower vals))))
 
-(def-op *qbe* :param (type name)
-  (cond ((string-equal (string type) "...") "...")
-        ((string-equal (string type) "env") (format nil "env ~a" (lower name)))
-        (t (format nil "~(~a~) ~a" type (lower name)))))
-
-;; Usage: (:union (:field b) (:field s))
-(def-op *qbe* :union (&rest variants)
-  (format nil "{ ~{~a~^ ~} }" 
-          (mapcar (lambda (v) (format nil "{ ~a }" (lower v))) 
-                  variants)))
+(def-op *qbe* :param (type &optional name)
+  (cond ((eq type :...) "...")
+        ((eq type :env) (format nil "env ~a" (lower name)))
+        (t (unless (qbe-abity-p type)
+             (error "QBE: Invalid ABITY ~S in param." type))
+           (if (qbe-aggregate-type-p type)
+               (format nil "~a ~a" (lower type) (lower name))
+               (format nil "~(~a~) ~a" type (lower name))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Blocks and Control Flow
@@ -128,7 +179,7 @@
   "hlt")
 
 ;; -----------------------------------------------------------------------------
-;; Instructions (Now with strict keyword validation)
+;; Instructions (with strict keyword validation)
 ;; -----------------------------------------------------------------------------
 
 (def-op *qbe* :assign (var type op &rest args)
@@ -136,81 +187,70 @@
     (error "QBE: Invalid base type ~S in assignment. Expected :w, :l, :s, or :d." type))
   (unless (member op *qbe-assign-opcodes* :test #'eq)
     (error "QBE: Invalid assignment opcode ~S." op))
-  
   (format nil "~a =~(~a~) ~(~a~) ~{~a~^, ~}"
           (lower var) type op (mapcar #'lower args)))
 
 (def-op *qbe* :instr (op &rest args)
   (unless (member op *qbe-effect-opcodes* :test #'eq)
     (error "QBE: Invalid effectful opcode ~S." op))
-  
   (format nil "~(~a~) ~{~a~^, ~}" op (mapcar #'lower args)))
 
-
 ;; -----------------------------------------------------------------------------
-;; Declarations (Updated for keyword types)
+;; Calls
 ;; -----------------------------------------------------------------------------
-
-(def-op *qbe* :field (type &optional count)
-  (unless (member type *qbe-ext-types* :test #'eq)
-    (error "QBE: Invalid extended type ~S in field." type))
-  (if count
-      (format nil "~(~a~) ~a" type count)
-      (format nil "~(~a~)" type)))
-
-(def-op *qbe* :data-item (type &rest vals)
-  (unless (member type *qbe-ext-types* :test #'eq)
-    (error "QBE: Invalid extended type ~S in data-item." type))
-  (if (eq type :z)
-      (format nil "z ~a" (first vals))
-      (format nil "~(~a~) ~{~a~^ ~}" type vals)))
-
-(def-op *qbe* :param (type &optional name)
-  (cond ((eq type :...) "...")
-        ((eq type :env) (format nil "env ~a" (lower name)))
-        (t (unless (member type *qbe-base-types* :test #'eq)
-             (error "QBE: Invalid type ~S in param." type))
-           (format nil "~(~a~) ~a" type (lower name)))))
 
 (def-op *qbe* :call-assign (var type target &rest args)
-  (unless (member type *qbe-base-types* :test #'eq)
-    (error "QBE: Invalid return type ~S in call." type))
-  (format nil "~a =~(~a~) call ~a(~{~a~^, ~})"
-          (lower var) type (lower target) (mapcar #'lower args)))
+  (unless (qbe-abity-p type)
+    (error "QBE: Invalid return ABITY ~S in call." type))
+  (if (qbe-aggregate-type-p type)
+      (format nil "~a =~a call ~a(~{~a~^, ~})"
+              (lower var) (lower type) (lower target) (mapcar #'lower args))
+      (format nil "~a =~(~a~) call ~a(~{~a~^, ~})"
+              (lower var) type (lower target) (mapcar #'lower args))))
 
 (def-op *qbe* :call-arg (type val)
   (cond ((eq type :...) "...")
         ((eq type :env) (format nil "env ~a" (lower val)))
-        (t (format nil "~(~a~) ~a" type (lower val)))))
+        (t (unless (qbe-abity-p type)
+             (error "QBE: Invalid ABITY ~S in call-arg." type))
+           (if (qbe-aggregate-type-p type)
+               (format nil "~a ~a" (lower type) (lower val))
+               (format nil "~(~a~) ~a" type (lower val))))))
 
 (def-op *qbe* :call (target &rest args)
   (format nil "call ~a(~{~a~^, ~})"
           (lower target) (mapcar #'lower args)))
 
+;; -----------------------------------------------------------------------------
+;; Phi
+;; -----------------------------------------------------------------------------
+
 (def-op *qbe* :phi (var type &rest args)
+  (unless (member type *qbe-base-types* :test #'eq)
+    (error "QBE: Invalid base type ~S in phi. Expected :w, :l, :s, or :d." type))
   (let ((pairs (loop for (lbl val) on args by #'cddr
                      collect (format nil "~a ~a" (lower lbl) (lower val)))))
     (format nil "~a =~(~a~) phi ~{~a~^, ~}" (lower var) type pairs)))
 
-
 ;; -----------------------------------------------------------------------------
 ;; Building
 ;; -----------------------------------------------------------------------------
-(defun build-qbe-ast (ast &key 
-                            (out-name "program") 
-                            (runtime-c "runtime.c") 
+
+(defun build-qbe-ast (ast &key
+                            (out-name "program")
+                            (runtime-c "runtime.c")
                             (keep-temp-files t))
   "Compiles a QBE AST into an executable using `qbe` and `clang`."
   (let ((ssa-file (format nil "~a.ssa" out-name))
         (asm-file (format nil "~a.s" out-name))
         ;; Lower the AST to a string using our interpreter
         (il-string (lower *qbe* ast)))
-    
+
     ;; 1. Write the Intermediate Language to a .ssa file
     (format t ";; Writing IL to ~S~%" ssa-file)
     (with-open-file (stream ssa-file :direction :output :if-exists :supersede)
       (write-string il-string stream))
-    
+
     ;; 2. Run QBE to compile .ssa to assembly (.s)
     (format t ";; Running QBE: qbe -o ~a ~a~%" asm-file ssa-file)
     (handler-case
@@ -219,7 +259,7 @@
                           :error-output *error-output*)
       (error (e)
         (error "QBE compilation failed: ~a" e)))
-    
+
     ;; 3. Run Clang to compile the assembly, link with runtime.c, and output an executable
     (format t ";; Running Clang: clang -o ~a ~a ~a~%" out-name asm-file runtime-c)
     (handler-case
@@ -228,14 +268,14 @@
                           :error-output *error-output*)
       (error (e)
         (error "Clang linking failed: ~a" e)))
-    
+
     ;; 4. Clean up intermediate files if requested
     (unless keep-temp-files
       (delete-file ssa-file)
       (delete-file asm-file)
       (format t ";; Cleaned up intermediate files.~%"))
-    
+
     (format t ";; Build complete! Executable created: ./~a~%" out-name)
-    
+
     ;; Return the path to the executable
     out-name))
