@@ -143,3 +143,12 @@ TODO:
 - implement c-style language, also lambda-calculus / scheme type of language
 
 Idea: fil-c-like transform? https://www.corsix.org/content/simplified-model-of-fil-c
+
+# 4/16/26
+
+Made the (def-op) macro more powerful, so it can match on ASTs in the exact same manner as a lambda list, so it supports positional arguments, keyword arguments, optional arguments, and &rest.
+It can also now call other lowering functions in a mutually recursive way, or just recurse using itself using (recurse x).
+Also added condition handlers to configure the behavior when an interpreter comes across a keyword without a handler defined.
+It can error out, pass the sub-tree through, or recursively call the same interpreter on the sub-tree.
+Also added tests.
+The QBE hello world example still works.

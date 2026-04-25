@@ -63,80 +63,80 @@
 ;; -----------------------------------------------------------------------------
 
 ;; Usage: (:global "foo" 8) -> "$foo + 8"
-(def-op *qbe* :global (name &optional offset)
+(def-op *qbe* (:global name &optional offset)
   (if offset
       (format nil "$~a + ~a" name offset)
       (format nil "$~a" name)))
 
-(def-op *qbe* :thread (name)
+(def-op *qbe* (:thread name)
   (format nil "thread $~a" name))
 
-(def-op *qbe* :temp (name)
+(def-op *qbe* (:temp name)
   (format nil "%~a" name))
 
-(def-op *qbe* :label (name)
+(def-op *qbe* (:label name)
   (format nil "@~a" name))
 
-(def-op *qbe* :user-type (name)
+(def-op *qbe* (:user-type name)
   (format nil ":~a" name))
 
 ;; -----------------------------------------------------------------------------
 ;; Top-Level Declarations
 ;; -----------------------------------------------------------------------------
 
-(def-op *qbe* :module (&rest decls)
-  (format nil "~{~a~^~%~%~}" (mapcar #'lower decls)))
+(def-op *qbe* (:module &rest decls)
+  (format nil "~{~a~^~%~%~}" (mapcar #'recurse decls)))
 
-(def-op *qbe* :type (name align &rest fields)
+(def-op *qbe* (:type name align &rest fields)
   (format nil "type ~a = ~@[align ~a ~]{ ~{~a~^, ~} }"
-          (lower name) align (mapcar #'lower fields)))
+          (recurse name) align (mapcar #'recurse fields)))
 
 ;; Usage: (:opaque ":name" 16 32)
-(def-op *qbe* :opaque (name align size)
-  (format nil "type ~a = align ~a { ~a }" (lower name) align size))
+(def-op *qbe* (:opaque name align size)
+  (format nil "type ~a = align ~a { ~a }" (recurse name) align size))
 
 ;; Top-level union type definition.
 ;; Usage: (:union-type :myunion 8 (:union (:field :b)) (:union (:field :s)))
-(def-op *qbe* :union-type (name align &rest variants)
+(def-op *qbe* (:union-type name align &rest variants)
   (format nil "type ~a = ~@[align ~a ~]{ ~{~a~^ ~} }"
-          (lower name)
+          (recurse name)
           align
           (mapcar (lambda (v)
                     (format nil "{ ~{~a~^, ~} }"
-                            (mapcar #'lower (rest v)))) ; strip :union head
+                            (mapcar #'recurse (rest v)))) ; strip :union head
                   variants)))
 
 ;; Bare union body (for embedding if needed).
-(def-op *qbe* :union (&rest variants)
+(def-op *qbe* (:union &rest variants)
   (format nil "{ ~{~a~^ ~} }"
-          (mapcar (lambda (v) (format nil "{ ~a }" (lower v)))
+          (mapcar (lambda (v) (format nil "{ ~a }" (recurse v)))
                   variants)))
 
-(def-op *qbe* :data (name linkage align &rest items)
+(def-op *qbe* (:data name linkage align &rest items)
   ;; linkage may be nil, a single flag, or a list of flags
   (format nil "~adata ~a = ~@[align ~a ~]{ ~{~a~^, ~} }"
           (format-linkage linkage)
-          (lower name)
+          (recurse name)
           align
-          (mapcar #'lower items)))
+          (mapcar #'recurse items)))
 
-(def-op *qbe* :function (name linkage ret-type params &rest blocks)
+(def-op *qbe* (:function name linkage ret-type params &rest blocks)
   ;; ret-type may be nil (void). `~@[...~]` suppresses the type when nil.
   (format nil "~afunction ~@[~(~a~) ~]~a(~{~a~^, ~}) {~%~{~a~^~%~}~%}"
           (format-linkage linkage)
           ret-type
-          (lower name)
-          (mapcar #'lower params)
-          (mapcar #'lower blocks)))
+          (recurse name)
+          (mapcar #'recurse params)
+          (mapcar #'recurse blocks)))
 
-(def-op *qbe* :field (type &optional count)
+(def-op *qbe* (:field type &optional count)
   (unless (member type *qbe-ext-types* :test #'eq)
     (error "QBE: Invalid extended type ~S in field." type))
   (if count
       (format nil "~(~a~) ~a" type count)
       (format nil "~(~a~)" type)))
 
-(def-op *qbe* :data-item (type &rest vals)
+(def-op *qbe* (:data-item type &rest vals)
   (unless (member type *qbe-ext-types* :test #'eq)
     (error "QBE: Invalid extended type ~S in data-item." type))
   (if (eq type :z)
@@ -144,93 +144,93 @@
         (unless (= (length vals) 1)
           (error "QBE: :z data-item takes exactly one size argument, got ~S." vals))
         (format nil "z ~a" (first vals)))
-      (format nil "~(~a~) ~{~a~^ ~}" type (mapcar #'lower vals))))
+      (format nil "~(~a~) ~{~a~^ ~}" type (mapcar #'recurse vals))))
 
-(def-op *qbe* :param (type &optional name)
+(def-op *qbe* (:param type &optional name)
   (cond ((eq type :...) "...")
-        ((eq type :env) (format nil "env ~a" (lower name)))
+        ((eq type :env) (format nil "env ~a" (recurse name)))
         (t (unless (qbe-abity-p type)
              (error "QBE: Invalid ABITY ~S in param." type))
            (if (qbe-aggregate-type-p type)
-               (format nil "~a ~a" (lower type) (lower name))
-               (format nil "~(~a~) ~a" type (lower name))))))
+               (format nil "~a ~a" (recurse type) (recurse name))
+               (format nil "~(~a~) ~a" type (recurse name))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Blocks and Control Flow
 ;; -----------------------------------------------------------------------------
 
-(def-op *qbe* :block (name &rest instrs)
+(def-op *qbe* (:block name &rest instrs)
   (format nil "~a~%~{        ~a~^~%~}"
-          (lower name) (mapcar #'lower instrs)))
+          (recurse name) (mapcar #'recurse instrs)))
 
-(def-op *qbe* :jmp (label)
-  (format nil "jmp ~a" (lower label)))
+(def-op *qbe* (:jmp label)
+  (format nil "jmp ~a" (recurse label)))
 
-(def-op *qbe* :jnz (val label-true label-false)
+(def-op *qbe* (:jnz val label-true label-false)
   (format nil "jnz ~a, ~a, ~a"
-          (lower val) (lower label-true) (lower label-false)))
+          (recurse val) (recurse label-true) (recurse label-false)))
 
-(def-op *qbe* :ret (&optional val)
+(def-op *qbe* (:ret &optional val)
   (if val
-      (format nil "ret ~a" (lower val))
+      (format nil "ret ~a" (recurse val))
       "ret"))
 
-(def-op *qbe* :hlt ()
+(def-op *qbe* (:hlt)
   "hlt")
 
 ;; -----------------------------------------------------------------------------
 ;; Instructions (with strict keyword validation)
 ;; -----------------------------------------------------------------------------
 
-(def-op *qbe* :assign (var type op &rest args)
+(def-op *qbe* (:assign var type op &rest args)
   (unless (member type *qbe-base-types* :test #'eq)
     (error "QBE: Invalid base type ~S in assignment. Expected :w, :l, :s, or :d." type))
   (unless (member op *qbe-assign-opcodes* :test #'eq)
     (error "QBE: Invalid assignment opcode ~S." op))
   (format nil "~a =~(~a~) ~(~a~) ~{~a~^, ~}"
-          (lower var) type op (mapcar #'lower args)))
+          (recurse var) type op (mapcar #'recurse args)))
 
-(def-op *qbe* :instr (op &rest args)
+(def-op *qbe* (:instr op &rest args)
   (unless (member op *qbe-effect-opcodes* :test #'eq)
     (error "QBE: Invalid effectful opcode ~S." op))
-  (format nil "~(~a~) ~{~a~^, ~}" op (mapcar #'lower args)))
+  (format nil "~(~a~) ~{~a~^, ~}" op (mapcar #'recurse args)))
 
 ;; -----------------------------------------------------------------------------
 ;; Calls
 ;; -----------------------------------------------------------------------------
 
-(def-op *qbe* :call-assign (var type target &rest args)
+(def-op *qbe* (:call-assign var type target &rest args)
   (unless (qbe-abity-p type)
     (error "QBE: Invalid return ABITY ~S in call." type))
   (if (qbe-aggregate-type-p type)
       (format nil "~a =~a call ~a(~{~a~^, ~})"
-              (lower var) (lower type) (lower target) (mapcar #'lower args))
+              (recurse var) (recurse type) (recurse target) (mapcar #'recurse args))
       (format nil "~a =~(~a~) call ~a(~{~a~^, ~})"
-              (lower var) type (lower target) (mapcar #'lower args))))
+              (recurse var) type (recurse target) (mapcar #'recurse args))))
 
-(def-op *qbe* :call-arg (type val)
+(def-op *qbe* (:call-arg type val)
   (cond ((eq type :...) "...")
-        ((eq type :env) (format nil "env ~a" (lower val)))
+        ((eq type :env) (format nil "env ~a" (recurse val)))
         (t (unless (qbe-abity-p type)
              (error "QBE: Invalid ABITY ~S in call-arg." type))
            (if (qbe-aggregate-type-p type)
-               (format nil "~a ~a" (lower type) (lower val))
-               (format nil "~(~a~) ~a" type (lower val))))))
+               (format nil "~a ~a" (recurse type) (recurse val))
+               (format nil "~(~a~) ~a" type (recurse val))))))
 
-(def-op *qbe* :call (target &rest args)
+(def-op *qbe* (:call target &rest args)
   (format nil "call ~a(~{~a~^, ~})"
-          (lower target) (mapcar #'lower args)))
+          (recurse target) (mapcar #'recurse args)))
 
 ;; -----------------------------------------------------------------------------
 ;; Phi
 ;; -----------------------------------------------------------------------------
 
-(def-op *qbe* :phi (var type &rest args)
+(def-op *qbe* (:phi var type &rest args)
   (unless (member type *qbe-base-types* :test #'eq)
     (error "QBE: Invalid base type ~S in phi. Expected :w, :l, :s, or :d." type))
   (let ((pairs (loop for (lbl val) on args by #'cddr
-                     collect (format nil "~a ~a" (lower lbl) (lower val)))))
-    (format nil "~a =~(~a~) phi ~{~a~^, ~}" (lower var) type pairs)))
+                     collect (format nil "~a ~a" (recurse lbl) (recurse val)))))
+    (format nil "~a =~(~a~) phi ~{~a~^, ~}" (recurse var) type pairs)))
 
 ;; -----------------------------------------------------------------------------
 ;; Building
@@ -243,7 +243,7 @@
   "Compiles a QBE AST into an executable using `qbe` and `clang`."
   (let ((ssa-file (format nil "~a.ssa" out-name))
         (asm-file (format nil "~a.s" out-name))
-        ;; Lower the AST to a string using our interpreter
+        ;; recurse the AST to a string using our interpreter
         (il-string (lower *qbe* ast)))
 
     ;; 1. Write the Intermediate Language to a .ssa file

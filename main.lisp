@@ -19,9 +19,6 @@
 
 (format t "~a~%" (lower *qbe* *hello-world-ast*))
 
-;; No runtime.c needed — puts is in libc and main is our entry point.
-;; We pass an empty extra-sources list by using a dummy file or by
-;; editing build-qbe-ast to make runtime-c optional.
 (build-qbe-ast *hello-world-ast*
                :out-name "hello_world"
                :runtime-c "runtime.c"
