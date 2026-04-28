@@ -144,7 +144,7 @@ TODO:
 
 Idea: fil-c-like transform? https://www.corsix.org/content/simplified-model-of-fil-c
 
-# 4/16/26
+# 4/24/26
 
 Made the (def-op) macro more powerful, so it can match on ASTs in the exact same manner as a lambda list, so it supports positional arguments, keyword arguments, optional arguments, and &rest.
 It can also now call other lowering functions in a mutually recursive way, or just recurse using itself using (recurse x).
@@ -152,3 +152,15 @@ Also added condition handlers to configure the behavior when an interpreter come
 It can error out, pass the sub-tree through, or recursively call the same interpreter on the sub-tree.
 Also added tests.
 The QBE hello world example still works.
+
+# 4/25/26
+
+Made def-op allow recursive matching.
+- def-op
+  - added local macro overrides (like macrolet)
+  - added lower trace function
+  - added fresh-name function
+
+# 4/28/26
+
+Simple pass to rename variables in c-like language.

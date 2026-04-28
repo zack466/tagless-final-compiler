@@ -1,5 +1,6 @@
 (load "dev.lisp")
 (in-package #:tagless-compiler)
+(named-readtables:in-readtable tagless-compiler-syntax)
 
 (defparameter *hello-world-ast*
   '(:module
