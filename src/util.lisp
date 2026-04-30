@@ -402,6 +402,44 @@
                  ,@body)))
          (inherit-loc ,g-result ,g-expr)))))
 
+;; Helper called by MATCH-CASES at macroexpansion time. Defined in
+;; EVAL-WHEN so SBCL recognises it as a proper global function rather
+;; than a LABELS-local that it cannot statically prove is reachable.
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun %emit-match-case-clause (clause g-expr block-name)
+    "Emit one dispatch form for CLAUSE in a MATCH-CASES expansion.
+     G-EXPR and BLOCK-NAME are the gensyms introduced by the enclosing
+     macro for the scrutinee binding and the non-local-exit block."
+    (cond
+      ;; T fallback: no match attempt, just run the body.
+      ((and (consp clause) (eq (car clause) t))
+       `(return-from ,block-name
+          (progn ,@(rest clause))))
+      ;; Pattern clause: ((OPERATOR . LAMBDA-LIST) BODY*).
+      ((and (consp clause) (consp (car clause)))
+       (destructuring-bind ((operator &rest lambda-list) &rest body) clause
+         (unless (keywordp operator)
+           (error "match-cases: pattern head must be a keyword, got ~S"
+                  operator))
+         (let* ((parsed   (parse-lambda-list lambda-list))
+                (all-vars (flatten-vars parsed)))
+           `(when (and (consp ,g-expr) (eq (first ,g-expr) ,operator))
+              ;; A successful EQ match commits to this clause.
+              ;; If the args don't destructure, we let the
+              ;; MALFORMED-OPERATOR-ARGS error propagate -- falling
+              ;; through to a later clause would mask bugs in the
+              ;; user's pattern.
+              (return-from ,block-name
+                (destructuring-bind ,all-vars
+                    (match-lambda-list
+                     ,(emit-parsed-ll parsed)
+                     (rest ,g-expr)
+                     ,operator
+                     ,g-expr
+                     '(,operator ,@lambda-list))
+                  ,@body))))))
+      (t (error "match-cases: malformed clause ~S" clause)))))
+
 (defmacro match-cases (expr &body clauses)
   "Try CLAUSES in order against EXPR and run the body of the first
    match. Each clause is one of:
@@ -420,49 +458,17 @@
   (let ((g-expr   (gensym "EXPR"))
         (g-result (gensym "RESULT"))
         (block-name (gensym "MATCH-CASES")))
-    (labels ((emit-clause (clause)
-               (cond
-                 ;; T fallback: no match attempt, just run the body.
-                 ((and (consp clause) (eq (car clause) t))
-                  `(return-from ,block-name
-                     (progn ,@(rest clause))))
-                 ;; Pattern clause.
-                 ((and (consp clause) (consp (car clause)))
-                  (destructuring-bind ((operator &rest lambda-list)
-                                       &rest body)
-                      clause
-                    (unless (keywordp operator)
-                      (error "match-cases: pattern head must be a keyword, ~
-                              got ~S" operator))
-                    (let* ((parsed   (parse-lambda-list lambda-list))
-                           (all-vars (flatten-vars parsed)))
-                      `(when (and (consp ,g-expr)
-                                  (eq (first ,g-expr) ,operator))
-                         ;; A successful EQ match commits to this clause.
-                         ;; If the args don't destructure, we let the
-                         ;; MALFORMED-OPERATOR-ARGS error propagate --
-                         ;; falling through to a later clause would mask
-                         ;; bugs in the user's pattern.
-                         (return-from ,block-name
-                           (destructuring-bind ,all-vars
-                               (match-lambda-list
-                                ,(emit-parsed-ll parsed)
-                                (rest ,g-expr)
-                                ,operator
-                                ,g-expr
-                                '(,operator ,@lambda-list))
-                             ,@body)))))))
-                 (t (error "match-cases: malformed clause ~S" clause)))))
-      `(let* ((,g-expr ,expr)
-              (,g-result
-                (block ,block-name
-                  ,@(mapcar #'emit-clause clauses)
-                  (error 'malformed-operator-args
-                         :operator (and (consp ,g-expr) (first ,g-expr))
-                         :expression ,g-expr
-                         :pattern '(match-cases
-                                    ,@(loop for c in clauses
-                                            when (and (consp c)
-                                                      (consp (car c)))
-                                            collect (car c)))))))
-         (inherit-loc ,g-result ,g-expr))))
+    `(let* ((,g-expr ,expr)
+            (,g-result
+              (block ,block-name
+                ,@(mapcar (lambda (c)
+                            (%emit-match-case-clause c g-expr block-name))
+                          clauses)
+                (error 'malformed-operator-args
+                       :operator (and (consp ,g-expr) (first ,g-expr))
+                       :expression ,g-expr
+                       :pattern '(match-cases
+                                  ,@(loop for c in clauses
+                                          when (and (consp c) (consp (car c)))
+                                          collect (car c)))))))
+       (inherit-loc ,g-result ,g-expr))))

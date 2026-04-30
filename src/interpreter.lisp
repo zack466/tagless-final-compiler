@@ -550,6 +550,12 @@
               ,(first clause)
               ,expr
               ',clause)
+           ;; Pre-declare all lambda-list variables ignorable so handlers
+           ;; don't need their own (declare (ignore ...)) for unused params.
+           ;; This must sit directly in the destructuring-bind body (not
+           ;; inside the flet below) so SBCL correctly associates the
+           ;; declaration with the bindings it introduces.
+           ,@(when all-vars `((declare (ignorable ,@all-vars))))
            (flet ((recurse (x) (lower ,interp x))
                   (recurse-splice (x) (lower ,interp x :splice t))
                   (expr () ,expr)

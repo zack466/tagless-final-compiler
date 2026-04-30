@@ -180,13 +180,12 @@
 ;; --- Sigils ---
 
 (def-op *qbe-validate* (:global name &optional offset)
-  (declare (ignore name offset))
   t)
 
-(def-op *qbe-validate* (:thread name) (declare (ignore name)) t)
-(def-op *qbe-validate* (:temp name)   (declare (ignore name)) t)
-(def-op *qbe-validate* (:label name)  (declare (ignore name)) t)
-(def-op *qbe-validate* (:user-type name) (declare (ignore name)) t)
+(def-op *qbe-validate* (:thread name) t)
+(def-op *qbe-validate* (:temp name)   t)
+(def-op *qbe-validate* (:label name)  t)
+(def-op *qbe-validate* (:user-type name) t)
 
 ;; --- Top-level declarations ---
 
@@ -195,18 +194,15 @@
   t)
 
 (def-op *qbe-validate* (:type name align &rest fields)
-  (declare (ignore name align))
   (dolist (f fields)
     (check-cons-with-head f :field (expr) ":type field")
     (recurse f))
   t)
 
 (def-op *qbe-validate* (:opaque name align size)
-  (declare (ignore name align size))
   t)
 
 (def-op *qbe-validate* (:union-type name align &rest variants)
-  (declare (ignore name align))
   (dolist (v variants)
     (check-cons-with-head v :union (expr) ":union-type variant")
     (recurse v))
@@ -219,14 +215,12 @@
   t)
 
 (def-op *qbe-validate* (:data name linkage align &rest items)
-  (declare (ignore name linkage align))
   (dolist (item items)
     (check-cons-with-head item :data-item (expr) ":data item")
     (recurse item))
   t)
 
 (def-op *qbe-validate* (:function name linkage ret-type params &rest blocks)
-  (declare (ignore name linkage))
   ;; ret-type may be nil (void) or any ABITY.
   (when ret-type
     (check-abity ret-type (expr) ":function return type"))
@@ -239,7 +233,6 @@
   t)
 
 (def-op *qbe-validate* (:field type &optional count)
-  (declare (ignore count))
   (check-ext-type type (expr) ":field")
   t)
 
@@ -253,7 +246,6 @@
   t)
 
 (def-op *qbe-validate* (:param type &optional name)
-  (declare (ignore name))
   (cond ((eq type :...) t)
         ((eq type :env) t)
         (t (check-abity type (expr) ":param")))
@@ -262,7 +254,6 @@
 ;; --- Blocks and control flow ---
 
 (def-op *qbe-validate* (:block name &rest instrs)
-  (declare (ignore name))
   (mapc #'recurse instrs)
   t)
 
@@ -283,7 +274,6 @@
 ;; --- Instructions ---
 
 (def-op *qbe-validate* (:assign var type op &rest args)
-  (declare (ignore var))
   (check-base-type type (expr) ":assign")
   (check-assign-opcode op (expr))
   (mapc #'recurse args)
@@ -297,7 +287,6 @@
 ;; --- Calls ---
 
 (def-op *qbe-validate* (:call-assign var type target &rest args)
-  (declare (ignore var))
   (check-abity type (expr) ":call-assign return type")
   (recurse target)
   (dolist (a args)
@@ -322,7 +311,6 @@
 ;; --- Phi ---
 
 (def-op *qbe-validate* (:phi var type &rest args)
-  (declare (ignore var))
   (check-base-type type (expr) ":phi")
   (when (oddp (length args))
     (qbe-error (expr)
