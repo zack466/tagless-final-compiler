@@ -3,7 +3,8 @@
 ;; --- def-op lambda list parser ---
 ;;
 ;; A def-op lambda list looks like:
-;;   (param*
+;;   ([&whole var]
+;;    param*
 ;;    [&optional opt-spec*]
 ;;    [&rest pattern]
 ;;    [&key key-spec*])
@@ -15,10 +16,26 @@
 ;;   pattern  (recursive position) is a symbol or a nested lambda list
 ;;
 ;; Nested lambda lists have full parity with top-level: any param/pattern
-;; position can itself be a list with its own &optional / &rest / &key.
-;; This means (def-op interp (:head (a b) c) ...) destructures the first
-;; argument, and (def-op interp (:head (a &optional (b 0)) c) ...) does
-;; the obvious thing.
+;; position can itself be a list with its own &whole / &optional / &rest /
+;; &key. This means (def-op interp (:head (a b) c) ...) destructures the
+;; first argument, and (def-op interp (:head (&whole pair a b) c) ...)
+;; binds PAIR to the original (a b) cons -- preserving its source-loc --
+;; while still destructuring it into A and B.
+;;
+;; --- &whole and source-loc propagation ---
+;;
+;; When the matcher destructures a sub-pattern like (type name) from an
+;; input cons, the *value* it pulled apart is a cons that has a source-loc
+;; in *SOURCE-LOCATIONS*. The leaves type and name are atoms and can't
+;; carry locs, so a handler that wants to reuse the (type name) sub-cons
+;; with its loc intact can use &whole to get a binding for the original:
+;;
+;;   (def-op interp (:declare (&whole tn type name) value)
+;;     (list :declare tn (recurse value)))    ; tn keeps its loc
+;;
+;; Without &whole, the handler would have to rebuild (list type name) and
+;; then call inherit-from manually. With it, the matcher hands back the
+;; original cons and propagation is automatic.
 ;;
 ;; Matching happens at runtime in MATCH-LAMBDA-LIST so DEF-OP itself stays
 ;; small: the macro parses the lambda list (at compile time, for early
@@ -32,18 +49,21 @@
 ;; symbol -- :COUNT here. When the variable position is itself a nested
 ;; pattern, there's no symbol to derive a keyword from, so &key parameters
 ;; must remain symbols. The parser raises a clear error if asked to nest
-;; under &key. (&optional and &rest both nest fine.)
+;; under &key. (&whole, &optional, and &rest all nest fine.)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
 
   (defstruct parsed-ll
     "A parsed lambda list, used both at top level and recursively for
-     nested patterns. POSITIONALS is a list whose elements are either
-     symbols (leaf) or PARSED-LL structs (nested). OPTIONALS is a list
-     of (PARAM DEFAULT-FORM) where PARAM is symbol-or-PARSED-LL.
-     REST-VAR is a symbol, a PARSED-LL, or NIL. KEY-SPECS is a list of
-     (KEYWORD SYMBOL DEFAULT-FORM) -- key vars are restricted to
-     symbols, see file header."
+     nested patterns. WHOLE-VAR is a symbol or NIL; if non-nil, the
+     entire input list at this level is bound to that name (in addition
+     to any leaf bindings from the destructured pattern). POSITIONALS
+     is a list whose elements are either symbols (leaf) or PARSED-LL
+     structs (nested). OPTIONALS is a list of (PARAM DEFAULT-FORM) where
+     PARAM is symbol-or-PARSED-LL. REST-VAR is a symbol, a PARSED-LL,
+     or NIL. KEY-SPECS is a list of (KEYWORD SYMBOL DEFAULT-FORM) --
+     key vars are restricted to symbols, see file header."
+    whole-var
     positionals
     optionals
     rest-var
@@ -67,14 +87,31 @@
      Each parameter position accepts either a symbol or a nested lambda
      list (which is recursively parsed). DEFAULT-FORM is left as a raw
      form -- the macro turns it into a thunk before passing the parsed
-     structure to MATCH-LAMBDA-LIST."
+     structure to MATCH-LAMBDA-LIST.
+
+     &whole, if present, must be the first element and is followed by
+     a non-keyword symbol that will be bound to the entire input value
+     at this nesting level."
     (unless (listp lambda-list)
       (error "def-op: lambda list must be a list, got ~S" lambda-list))
-    (let ((positionals '())
+    (let ((whole-var   nil)
+          (positionals '())
           (optionals   '())
           (rest-var    nil)
           (key-specs   '())
           (state       :positional))
+      ;; &whole must be the very first element if present. We peel it off
+      ;; here, before the main loop, so the state machine doesn't have to
+      ;; carry an awkward :whole-allowed flag.
+      (when (and lambda-list (eq (first lambda-list) '&whole))
+        (pop lambda-list)
+        (unless lambda-list
+          (error "def-op: &whole must be followed by a variable"))
+        (let ((var (pop lambda-list)))
+          (unless (and (symbolp var) (not (keywordp var)))
+            (error "def-op: &whole variable must be a non-keyword symbol, ~
+                    got ~S" var))
+          (setf whole-var var)))
       (labels ((split-spec (spec what)
                  ;; Return (values PARAM DEFAULT-FORM) for an &optional or &key
                  ;; spec. PARAM is the raw form -- caller decides whether to
@@ -114,6 +151,8 @@
         (loop while lambda-list do
           (let ((item (pop lambda-list)))
             (case item
+              (&whole    (error "def-op: &whole must be the first element ~
+                                 of a lambda list"))
               (&optional (advance-state :optional '(:positional)))
               (&rest     (advance-state :rest     '(:positional :optional))
                          (unless lambda-list
@@ -141,6 +180,7 @@
                       (push (list (intern (symbol-name raw) :keyword) raw default)
                             key-specs)))))))))
       (make-parsed-ll
+       :whole-var   whole-var
        :positionals (nreverse positionals)
        :optionals   (nreverse optionals)
        :rest-var    rest-var
@@ -148,14 +188,18 @@
 
   (defun flatten-vars (parsed)
     "Walk PARSED (a PARSED-LL) and return the leaf variable symbols in
-     match order: positionals (recursing into nested), then optionals
-     (recursing), then rest (recursing), then keys."
+     match order: &whole (if any), then positionals (recursing into
+     nested), then optionals (recursing), then rest (recursing), then
+     keys."
     (let ((acc '()))
       (labels ((walk-param (p)
                  (cond ((null p))
                        ((symbolp p) (push p acc))
                        ((parsed-ll-p p) (walk-ll p))))
                (walk-ll (ll)
+                 ;; &whole comes first to match the matcher's emission order.
+                 (when (parsed-ll-whole-var ll)
+                   (push (parsed-ll-whole-var ll) acc))
                  (dolist (p (parsed-ll-positionals ll)) (walk-param p))
                  (dolist (spec (parsed-ll-optionals ll))
                    (walk-param (first spec)))
@@ -196,6 +240,11 @@
                ;; Match a single value against a single parameter
                ;; (symbol or nested PARSED-LL). Returns a list of values
                ;; in flatten-vars order for that parameter's subtree.
+               ;;
+               ;; For a nested pattern, the sub-input VALUE is the
+               ;; original cons that the caller is destructuring -- and
+               ;; if the nested pattern has &whole, that var binds to
+               ;; this exact cons, source-loc and all.
                (cond ((symbolp param)
                       (list value))
                      ((parsed-ll-p param)
@@ -205,6 +254,11 @@
              (match-ll (ll args)
                (let ((values    '())
                      (remaining args))
+                 ;; 0. &whole captures the input list at this level. The
+                 ;; binding holds the original cons (or NIL for an empty
+                 ;; list), so any source-loc on it is preserved.
+                 (when (parsed-ll-whole-var ll)
+                   (push args values))
                  ;; 1. Required positionals.
                  (dolist (param (parsed-ll-positionals ll))
                    (unless remaining (fail))
@@ -275,6 +329,7 @@
              (thunk (form)
                (if form `(lambda () ,form) 'nil)))
       `(make-parsed-ll
+        :whole-var   ',(parsed-ll-whole-var parsed)
         :positionals (list ,@(mapcar #'emit-param
                                      (parsed-ll-positionals parsed)))
         :optionals   (list ,@(loop for (param default)
@@ -287,3 +342,127 @@
                                    collect `(list ,kw ',var
                                                   ,(thunk default))))))))
 
+
+;; --- Pattern matching helpers for handler bodies ---
+;;
+;; DEF-OP installs a single pattern at the boundary between LOWER's
+;; dispatch and the handler's body. That covers the common "destructure
+;; my input once" case but not handlers that need to look at a
+;; sub-expression and decide what to do based on its shape -- e.g. a
+;; rule that lowers (:set lhs val) differently when LHS is a bare
+;; variable vs. a (:field obj name) access.
+;;
+;; MATCH-PATTERN runs a single def-op-style pattern on an arbitrary
+;; expression and binds the leaf variables for a body. MATCH-CASES is
+;; the multi-clause form: it tries patterns in order, runs the first
+;; matching body, and signals if no clause matches (unless a T fallback
+;; is supplied).
+;;
+;; Both macros call INHERIT-LOC on their result so that any cons the
+;; body returns gets the matched expression's source-loc -- the same
+;; first-wins propagation LOWER does at the dispatch level. This means
+;; you can use these freely in handler bodies without worrying about
+;; locs falling off newly constructed sub-trees.
+;;
+;; Patterns are the same as DEF-OP's lambda lists, except they include
+;; the operator keyword as the head (since MATCH-PATTERN matches a
+;; whole expression, not just its arguments). So:
+;;
+;;   (match-pattern node (:set (&whole lhs lhs-name) val)
+;;     (list :store lhs val))
+;;
+;; matches NODE against (:set (some-name) some-val), with LHS bound to
+;; the original (some-name) cons and LHS-NAME, VAL bound to the leaves.
+;; If NODE doesn't match, MALFORMED-OPERATOR-ARGS is signalled.
+
+(defmacro match-pattern (expr (operator &rest lambda-list) &body body)
+  "Match EXPR against (OPERATOR . LAMBDA-LIST) and run BODY with the
+   leaf bindings. Signal MALFORMED-OPERATOR-ARGS on mismatch. The
+   value of BODY (if it's a cons that doesn't already have a loc)
+   inherits EXPR's source-loc."
+  (unless (keywordp operator)
+    (error "match-pattern: pattern head must be a keyword, got ~S" operator))
+  (let* ((parsed   (parse-lambda-list lambda-list))
+         (all-vars (flatten-vars parsed))
+         (g-expr   (gensym "EXPR"))
+         (g-result (gensym "RESULT")))
+    `(let ((,g-expr ,expr))
+       (unless (and (consp ,g-expr) (eq (first ,g-expr) ,operator))
+         (error 'malformed-operator-args
+                :operator ,operator
+                :expression ,g-expr
+                :pattern '(,operator ,@lambda-list)))
+       (let ((,g-result
+               (destructuring-bind ,all-vars
+                   (match-lambda-list ,(emit-parsed-ll parsed)
+                                      (rest ,g-expr)
+                                      ,operator
+                                      ,g-expr
+                                      '(,operator ,@lambda-list))
+                 ,@body)))
+         (inherit-loc ,g-result ,g-expr)))))
+
+(defmacro match-cases (expr &body clauses)
+  "Try CLAUSES in order against EXPR and run the body of the first
+   match. Each clause is one of:
+
+     ((OPERATOR . LAMBDA-LIST) BODY*)        -- pattern clause
+     (T BODY*)                               -- catch-all (must be last)
+
+   If no clause matches, signal MALFORMED-OPERATOR-ARGS. The value of
+   the matching body inherits EXPR's source-loc.
+
+   Usage:
+     (match-cases (recurse target)
+       ((:var name)            (list :load name))
+       ((:field obj name)      (list :load-field (recurse obj) name))
+       (t                      (error \"unsupported lvalue: ~S\" target)))"
+  (let ((g-expr   (gensym "EXPR"))
+        (g-result (gensym "RESULT"))
+        (block-name (gensym "MATCH-CASES")))
+    (labels ((emit-clause (clause)
+               (cond
+                 ;; T fallback: no match attempt, just run the body.
+                 ((and (consp clause) (eq (car clause) t))
+                  `(return-from ,block-name
+                     (progn ,@(rest clause))))
+                 ;; Pattern clause.
+                 ((and (consp clause) (consp (car clause)))
+                  (destructuring-bind ((operator &rest lambda-list)
+                                       &rest body)
+                      clause
+                    (unless (keywordp operator)
+                      (error "match-cases: pattern head must be a keyword, ~
+                              got ~S" operator))
+                    (let* ((parsed   (parse-lambda-list lambda-list))
+                           (all-vars (flatten-vars parsed)))
+                      `(when (and (consp ,g-expr)
+                                  (eq (first ,g-expr) ,operator))
+                         ;; A successful EQ match commits to this clause.
+                         ;; If the args don't destructure, we let the
+                         ;; MALFORMED-OPERATOR-ARGS error propagate --
+                         ;; falling through to a later clause would mask
+                         ;; bugs in the user's pattern.
+                         (return-from ,block-name
+                           (destructuring-bind ,all-vars
+                               (match-lambda-list
+                                ,(emit-parsed-ll parsed)
+                                (rest ,g-expr)
+                                ,operator
+                                ,g-expr
+                                '(,operator ,@lambda-list))
+                             ,@body)))))))
+                 (t (error "match-cases: malformed clause ~S" clause)))))
+      `(let* ((,g-expr ,expr)
+              (,g-result
+                (block ,block-name
+                  ,@(mapcar #'emit-clause clauses)
+                  (error 'malformed-operator-args
+                         :operator (and (consp ,g-expr) (first ,g-expr))
+                         :expression ,g-expr
+                         :pattern '(match-cases
+                                    ,@(loop for c in clauses
+                                            when (and (consp c)
+                                                      (consp (car c)))
+                                            collect (car c)))))))
+         (inherit-loc ,g-result ,g-expr))))

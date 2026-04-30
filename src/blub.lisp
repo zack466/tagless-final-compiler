@@ -82,68 +82,85 @@
 (defun filter (nodes predicate)
   (loop for node in nodes if (funcall predicate node) collect node))
 
-(def-op *blub-1* (:global (type name) &optional value)
-  ;; globals cannot have conflicting names.
+(defun register-global (name)
+  "Add NAME -> NAME to *var-rename-map*. Errors if NAME is already there."
   (when (nth-value 1 (fset:lookup *var-rename-map* name))
     (error "Global variable ~A already declared." name))
-  (setf *var-rename-map* (fset:with *var-rename-map* name name))
-  (list :global (list type name) (recurse value)))
+  (fset:includef *var-rename-map* name name)
+  name)
+
+(defun register-local (name)
+  "Add NAME -> chosen-name to *var-rename-map*, freshening if NAME is
+   already bound (shadowing). Returns the chosen name."
+  (let* ((found     (nth-value 1 (fset:lookup *var-rename-map* name)))
+         (new-name  (if found (fresh-name (string name)) name)))
+    (fset:includef *var-rename-map* name new-name)
+    new-name))
+
+(defun lookup-or-error (name kind)
+  "Look up NAME in *var-rename-map*. KIND is a string used in the error
+   message (e.g. \"assigned\" or \"read\"). Returns the renamed symbol."
+  (multiple-value-bind (mapped found) (fset:lookup *var-rename-map* name)
+    (unless found (error "Variable ~A but not yet declared: ~A." kind name))
+    mapped))
+
+(def-op *blub-1* (:global (type name) &optional value)
+  (register-global name)
+  (let ((type-name (list type name)))
+    (inherit-from type-name (expr))
+    (list :global type-name (recurse value))))
 
 (def-op *blub-1* (:declare (type name) &optional value)
-  (multiple-value-bind (existing found) (fset:lookup *var-rename-map* name)
-    (declare (ignore existing))
-    (let ((new-name (if found (fresh-name (string name)) name))
-          ;; Recurse on value BEFORE updating the map, so a self-referential
-          ;; declaration like (:declare (int x) (:var x)) refers to the
-          ;; outer x, not the one being declared.
-          (lowered-value (recurse value)))
-      (setf *var-rename-map* (fset:with *var-rename-map* name new-name))
-      (list :declare (list type new-name) lowered-value))))
+  ;; Recurse on VALUE *before* updating the map, so a self-referential
+  ;; declaration like (:declare (int x) (:var x)) resolves :var x
+  ;; against the OUTER scope's binding
+  (let* ((lowered-value (recurse value))
+         (new-name      (register-local name))
+         (type-name     (list type new-name)))
+    (inherit-from type-name (expr))
+    (list :declare type-name lowered-value)))
 
 (def-op *blub-1* (:assign name value)
-  (multiple-value-bind (mapped found) (fset:lookup *var-rename-map* name)
-    (unless found (error "Variable not yet declared: ~A." name))
-    (list :assign mapped (recurse value))))
+  (list :assign (lookup-or-error name "assigned") (recurse value)))
 
 (def-op *blub-1* (:var name)
-  (multiple-value-bind (mapped found) (fset:lookup *var-rename-map* name)
-    (unless found (error "Variable not yet declared: ~A." name))
-    (list :var mapped)))
+  (list :var (lookup-or-error name "read")))
 
 (def-op *blub-1* (:block &rest body)
-  ;; Fresh dynamic binding initialized from outer scope; setf inside
-  ;; only affects this binding, so changes don't leak out.
+  ;; Fresh dynamic binding initialized from outer scope, so changes don't leak
+  ;; out.
   (let ((*var-rename-map* *var-rename-map*))
     (cons :block (mapcar #'recurse body))))
 
 (def-op *blub-1* (:function type name (&rest args) &rest body)
   (let ((*var-rename-map* *var-rename-map*))
-    (loop for arg in args
-          do (let ((arg-name (cadr arg)))
-               (multiple-value-bind (existing found) (fset:lookup *var-rename-map* arg-name)
-                (let ((new-name (if found (fresh-name (string arg-name)) arg-name)))
-                  (setf *var-rename-map* (fset:with *var-rename-map* arg-name new-name))))))
-    (list :function type name args (mapcar #'recurse body))))
+    ;; Each ARG is a (type name) pair; we register the name (which may shadow
+    ;; an outer global with the same name) and rebuild the pair using the
+    ;; chosen new name.
+    (let ((renamed-args
+            (mapcar (lambda (arg)
+                      (destructuring-bind (arg-type arg-name) arg
+                        (let* ((new-name  (register-local arg-name))
+                               (new-pair  (list arg-type new-name)))
+                          (inherit-from new-pair arg)
+                          new-pair)))
+                    args)))
+      (list :function type name renamed-args (mapcar #'recurse body)))))
 
 (def-op *blub-1* (:module &rest body)
+  ;; Fresh empty map at module scope. Globals are processed first so
+  ;; their bindings are visible to all functions/blocks regardless of
+  ;; textual order, then the rest of the module is renamed.
   (let* ((*var-rename-map* (fset:empty-map))
          (globals (mapcar #'recurse (filter body (node-is-p :global))))
          (renamed (mapcar #'recurse (filter body (node-is-not-p :global)))))
     (cons :module (append globals renamed))))
 
-(defparameter *blub-program*
-  '(:module
-     (:global (int z) 10)
-    (:function int qbe_main ((int x))
-      (:declare (int y) 2)
-      (:assign y (:add (:var x) (:var y))))
-    (:block
-      (:declare (int z) 1)
-      (:declare (int y) 2)
-      (:declare (int y) 3)
-      (:assign y (:add (:var z) (:var y))))))
+(defparameter *blub-program* (car (read-sample "blub/1-shadowing.lisp")))
 
-(lower *blub-1* *blub-program*)
+(multiple-value-bind (body trace) (with-trace (lower *blub-1* *blub-program*))
+  (declare (ignore body))
+  (print-trace trace))
 
 ;; Blub pass: resolve functions/structs
 (def-op *blub-1* (:module &body body)

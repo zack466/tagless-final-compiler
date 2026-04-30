@@ -17,6 +17,11 @@
         sbcl-with-libs = pkgs.sbcl.withPackages (ps: with ps; [
           alexandria
           fset
+          named-readtables
+          eclector
+          eclector-concrete-syntax-tree
+          cl-ansi-text
+          cl-ppcre
         ]);
       in
       {

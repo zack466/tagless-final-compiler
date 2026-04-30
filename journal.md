@@ -161,6 +161,11 @@ Made def-op allow recursive matching.
   - added lower trace function
   - added fresh-name function
 
-# 4/28/26
+# 4/29/26
 
 Simple pass to rename variables in c-like language.
+
+Added nice things:
+- source locations for all sexprs in language
+- syntax highlighting for better looking outputs / error messages.
+- hella tests (look over to see if they are reasonable)

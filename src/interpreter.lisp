@@ -8,11 +8,19 @@
    (expression  :initarg :expression  :reader unknown-operator-expression)
    (interpreter :initarg :interpreter :reader unknown-operator-interpreter))
   (:report (lambda (c stream)
-             (format stream "No handler defined for operator ~S in interpreter ~S~@
-                             (expression: ~S)"
-                     (unknown-operator-operator c)
-                     (unknown-operator-interpreter c)
-                     (unknown-operator-expression c)))))
+             ;; Print the error message
+             (format stream "~A: " (severity-color :error "Error"))
+             (format stream "No handler defined for operator ~A in interpreter ~A~@
+                             (expression: ~A)"
+                     (lisp-to-string (unknown-operator-operator c))
+                     (bold (readable-name (unknown-operator-interpreter c)))
+                     (lisp-to-string (unknown-operator-expression c)))
+             ;; Print the source context
+             (let ((loc (source-loc-or-ancestor
+                         (unknown-operator-expression c))))
+               (when loc
+                 (format stream "~%  at:~%")
+                 (print-source-context loc :stream stream))))))
 
 (define-condition malformed-operator-args (error)
   ((operator   :initarg :operator   :reader malformed-operator-args-operator)
@@ -20,13 +28,19 @@
    (pattern    :initarg :pattern    :initform nil
                :reader malformed-operator-args-pattern))
   (:report (lambda (c stream)
+             (format stream "~A: " (severity-color :error "Error"))
              (format stream
-                     "Arguments to operator ~S do not match its expected shape.~@
-                      Expression: ~S~@
-                      Expected pattern: ~S"
-                     (malformed-operator-args-operator c)
-                     (malformed-operator-args-expression c)
-                     (malformed-operator-args-pattern c)))))
+                     "Arguments to operator ~A do not match its expected shape.~@
+                      Expression: ~A~@
+                      Expected pattern: ~A~@[~%  at ~A~]"
+                     (lisp-to-string (malformed-operator-args-operator c))
+                     (lisp-to-string (malformed-operator-args-expression c))
+                     (lisp-to-string (malformed-operator-args-pattern c))
+                     (let ((loc (source-loc-or-ancestor
+                                 (malformed-operator-args-expression c))))
+                       (when loc
+                         (format stream "~%  at:~%")
+                         (print-source-context loc :stream stream)))))))
 
 (defun passthrough-unknown-operator (condition)
   "Handler that resolves UNKNOWN-OPERATOR by returning the expression unchanged.
@@ -39,6 +53,8 @@
   "Handler that resolves UNKNOWN-OPERATOR by recursing into each element of
    the sub-expression's body. Rebuilds the expression with the original head
    (unknown operator) but with each argument lowered individually.
+   The rebuilt expression inherits its source location from the original
+   (first-wins semantics; the outer LOWER will not overwrite it).
    Invokes the USE-VALUE restart with the rebuilt expression."
   (let ((restart (find-restart 'use-value condition)))
     (when restart
@@ -46,8 +62,10 @@
              (interp (unknown-operator-interpreter condition))
              (head   (first expr))
              (args   (rest expr))
-             (rebuilt (cons head
-                            (mapcar (lambda (arg) (lower interp arg)) args))))
+             (rebuilt (inherit-loc
+                       (cons head
+                             (mapcar (lambda (arg) (lower interp arg)) args))
+                       expr)))
         (invoke-restart restart rebuilt)))))
 
 (defun apply-unknown-policy (policy condition)
@@ -57,7 +75,9 @@
     ((eq policy :passthrough) (passthrough-unknown-operator condition))
     ((eq policy :recurse)     (recurse-unknown-operator condition))
     ((functionp policy)       (funcall policy condition))
-    (t (error "Invalid ON-UNKNOWN policy: ~S" policy))))
+    (t (error "~A: Invalid ON-UNKNOWN policy: ~A"
+              (severity-color :error "Error")
+              (lisp-to-string policy)))))
 
 (defun signal-unknown-operator (interp op expr)
   "Signal an UNKNOWN-OPERATOR condition, offering USE-VALUE as a restart.
@@ -123,17 +143,27 @@
    (expression :initarg :expression :reader splice-in-expression-context-expression)
    (node-count :initarg :node-count :reader splice-in-expression-context-node-count))
   (:report (lambda (c stream)
+             (format stream "~A: " (severity-color :error "Error"))
              (format stream
-                     "Operator ~S returned a splice of ~D node~:P, but it was ~
+                     "Operator ~A returned a splice of ~A node~:P, but it was ~
                       lowered in expression context (which expects a single ~
                       value).~@
-                      Expression: ~S~@
-                      To splice here, the caller must use RECURSE-SPLICE or ~
-                      LOWER with :SPLICE T, and the surrounding form must be ~
+                      Expression: ~A~@
+                      ~A To splice here, the caller must use ~A or ~
+                      ~A with :SPLICE T, and the surrounding form must be ~
                       able to accept a sequence."
-                     (splice-in-expression-context-operator c)
-                     (splice-in-expression-context-node-count c)
-                     (splice-in-expression-context-expression c)))))
+                     (lisp-to-string (splice-in-expression-context-operator c))
+                     (bold (princ-to-string
+                            (splice-in-expression-context-node-count c)))
+                     (lisp-to-string (splice-in-expression-context-expression c))
+                     (severity-color :hint "hint:")
+                     (bold "RECURSE-SPLICE")
+                     (bold "LOWER"))
+             (let ((loc (source-loc-or-ancestor
+                         (splice-in-expression-context-expression c))))
+               (when loc
+                 (format stream "~%  at:~%")
+                 (print-source-context loc :stream stream))))))
 
 ;; --- Fresh name generation ---
 ;;
@@ -194,6 +224,15 @@
 ;;  - Gensym:    Fresh symbols can be generated within lowering calls by calling
 ;;               fresh-name. This is useful for transformations that produce
 ;;               intermediate variables/terms in the AST.
+;;  - Source locations: When a handler returns a freshly-constructed cons,
+;;               LOWER automatically attributes that cons to the input
+;;               expression's source location (if it has one). Splice nodes
+;;               each get the same attribution. The propagation uses
+;;               INHERIT-LOC's first-wins semantics, so handler-set locs
+;;               (via WITH-LOC / INHERIT-LOC) are never overwritten -- they
+;;               just override the auto-propagated default. After many
+;;               passes, derived nodes still point at the original source
+;;               line that produced them.
 
 (defclass interpreter ()
   ((handlers :initform (make-hash-table :test #'eq)
@@ -209,11 +248,31 @@
                 :recurse     -- recurse into arguments, keep head intact
                 a function   -- called with the condition; typically invokes
                                 a restart (USE-VALUE) or returns normally
-                                to fall through to :error behavior.")))
+                                to fall through to :error behavior.")
+   (propagate-source-locations
+    :initarg :propagate-source-locations
+    :initform t
+    :accessor propagate-source-locations
+    :documentation
+    "When true (the default), LOWER auto-attributes handler outputs to
+     the input expression's source location. Set to NIL to disable
+     auto-propagation (locs set explicitly by handlers still apply).")
+   (readable-name
+    :initarg :readable-name
+    :initform "GENERIC INTERPRETER"
+    :accessor readable-name
+    :documentation
+    "The name of the interpreter to print out in error message.")))
 
 ; Convenience function
-(defun make-interpreter (&key (on-unknown :error))
-  (make-instance 'interpreter :on-unknown on-unknown))
+(defun make-interpreter (&key (on-unknown :error)
+                              (propagate-source-locations t)
+                              (readable-name "GENERIC INTERPRETER")
+                              )
+  (make-instance 'interpreter
+                 :on-unknown on-unknown
+                 :propagate-source-locations propagate-source-locations
+                 :readable-name readable-name))
 
 (defgeneric lower (interpreter expression &key splice)
   (:documentation "Interprets the EXPRESSION using the rules defined in INTERPRETER.
@@ -225,7 +284,11 @@
    When SPLICE is T, the call is in *splice context*: LOWER always returns
    a list of nodes. A handler that returns a SPLICE wrapper is unwrapped
    into its NODES list (possibly empty); a handler that returns a single
-   value is wrapped into a one-element list."))
+   value is wrapped into a one-element list.
+
+   Source-loc propagation: after the handler returns, every cons in the
+   result that doesn't already have a source-loc inherits one from EXPR.
+   This is governed by the interpreter's PROPAGATE-SOURCE-LOCATIONS slot."))
 
 (defmethod lower ((interp interpreter) (expr cons) &key splice)
   "Interprets a list by looking up the operator keyword in the interpreter's table.
@@ -236,7 +299,9 @@
   (let ((op (first expr)))
     (cond
       ((not (keywordp op))
-       (error "Interpreter expects keyword operators, got ~S" op))
+       (error "~A: Interpreter expects keyword operators, got ~A"
+              (severity-color :error "Error")
+              (lisp-to-string op)))
       (t
        (call-with-trace-frame
         interp expr
@@ -244,9 +309,11 @@
           (let* ((handler (find-handler interp op))
                  (result  (if handler
                               (funcall handler expr)
-                              (signal-unknown-operator interp op expr))))
-            (values (coerce-result result splice op expr)
-                    (and handler t)))))))))
+                              (signal-unknown-operator interp op expr)))
+                 (coerced (coerce-result result splice op expr)))
+            (when (propagate-source-locations interp)
+              (propagate-locs coerced expr splice))
+            (values coerced (and handler t)))))))))
 
 (defmethod lower ((interp interpreter) (expr t) &key splice)
   "Atoms (numbers, symbols, strings, ...) lower to themselves. They can
@@ -275,12 +342,30 @@
             :node-count (length (splice-nodes result))))
     (t result)))
 
+(defun propagate-locs (coerced source splice-context-p)
+  "Attribute SOURCE's source-loc to each top-level cons in COERCED that
+   doesn't already have one. In splice context, COERCED is a list of
+   nodes and each gets attribution. In expression context, COERCED is
+   a single value (cons or atom) and only that value gets attribution.
+   Uses INHERIT-LOC's first-wins semantics: existing attributions are
+   preserved."
+  (cond
+    (splice-context-p
+     (dolist (node coerced)
+       (inherit-loc node source)))
+    (t
+     (inherit-loc coerced source))))
+
 ;; --- Tracing ---
 ;;
 ;; A trace is a tree of TRACE-ENTRY records, one per LOWER call. Each
 ;; entry records the input expression, the operator, whether a handler
 ;; fired, the final coerced output, and a list of children formed by
 ;; recursive LOWER calls made while computing the result.
+;;
+;; Trace entries also record the input's source-loc at frame-creation
+;; time, so even if downstream transformations rebuild nodes, the trace
+;; preserves the original-source attribution for display.
 ;;
 ;; Tracing is engaged via WITH-TRACE, which binds *TRACE-STACK* to a
 ;; one-element list whose head is a mutable accumulator for top-level
@@ -293,17 +378,20 @@
 (defstruct trace-entry
   "A node in a lower-trace tree.
 
-   INPUT      : the expression LOWER was called with (cons or atom)
-   OPERATOR   : keyword if the input was a cons whose head is one;
-                otherwise NIL
-   HANDLER-P  : T if a handler ran; NIL if the input was an atom or
-                an unknown operator with no handler
-   OUTPUT     : the coerced result returned to LOWER's caller
-   CHILDREN   : list of TRACE-ENTRY nodes from recursive LOWER calls"
+   INPUT       : the expression LOWER was called with (cons or atom)
+   OPERATOR    : keyword if the input was a cons whose head is one;
+                 otherwise NIL
+   HANDLER-P   : T if a handler ran; NIL if the input was an atom or
+                 an unknown operator with no handler
+   OUTPUT      : the coerced result returned to LOWER's caller
+   SOURCE-LOC  : the source-loc snapshot for INPUT at frame creation
+                 time, or NIL if unknown
+   CHILDREN    : list of TRACE-ENTRY nodes from recursive LOWER calls"
   input
   operator
   handler-p
   output
+  source-loc
   (children '() :type list))
 
 (defvar *trace-stack* nil
@@ -320,7 +408,8 @@
   (if (null *trace-stack*)
       (funcall thunk)
       (let* ((children-cell (list nil))
-             (op (and (consp expr) (keywordp (first expr)) (first expr))))
+             (op  (and (consp expr) (keywordp (first expr)) (first expr)))
+             (loc (source-loc-or-ancestor expr)))
         (let ((*trace-stack* (cons children-cell *trace-stack*)))
           (multiple-value-bind (result handler-p)
               (funcall thunk)
@@ -333,12 +422,13 @@
                           ;; in a parent's splice handler) don't mutate
                           ;; the snapshot we recorded.
                           :output (if (listp result) (copy-list result) result)
+                          :source-loc loc
                           :children (nreverse (car children-cell)))))
               ;; Push our entry onto our parent's accumulator.
               (push entry (car (second *trace-stack*)))
               result))))))
 
-(defmacro with-trace (() &body body)
+(defmacro with-trace (&body body)
   "Run BODY with tracing enabled. Returns (values BODY-VALUE TRACE),
    where TRACE is a list of TRACE-ENTRY trees -- one per top-level
    LOWER call performed in BODY."
@@ -349,20 +439,39 @@
             (,val (progn ,@body)))
        (values ,val (nreverse (car ,root))))))
 
-(defun print-trace (trace &key (stream *standard-output*) (indent 0))
+(defun print-trace (trace &key (stream *standard-output*) (indent 0)
+                               (show-locations t))
   "Pretty-print TRACE (a list of TRACE-ENTRY) to STREAM. Useful for
    eyeballing what fired during a lowering. Each line shows operator,
-   input, output; nested calls are indented."
+   input, output, and (when SHOW-LOCATIONS is true and the entry has
+   one) the original source location of the input. Nested calls are
+   indented."
   (dolist (entry trace)
-    (format stream "~&~v@T~A~A ~S => ~S~%"
-            indent
-            (or (trace-entry-operator entry) "<atom>")
-            (if (trace-entry-handler-p entry) "" "*") ; * = no handler
-            (trace-entry-input entry)
-            (trace-entry-output entry))
+    (let* ((op (trace-entry-operator entry))
+           (op-str (cond
+                     ((null op) (gray "<atom>"))
+                     ((trace-entry-handler-p entry) (blue (princ-to-string op)
+                                                          :bright t))
+                     ;; No handler fired: dim the operator and tag it.
+                     (t (format nil "~A~A"
+                                (yellow (princ-to-string op))
+                                (yellow "*"))))))
+      (format stream "~&~v@T~A ~A ~A ~A~@[ ~A~]~%"
+              indent
+              op-str
+              (lisp-to-string (trace-entry-input entry))
+              (gray "=>")
+              (lisp-to-string (trace-entry-output entry))
+              (and show-locations
+                   (trace-entry-source-loc entry)
+                   (gray
+                    (format nil "[at ~A]"
+                            (format-source-loc
+                             (trace-entry-source-loc entry)))))))
     (print-trace (trace-entry-children entry)
                  :stream stream
-                 :indent (+ indent 2))))
+                 :indent (+ indent 2)
+                 :show-locations show-locations)))
 
 ;; --- def-op ---
 ;;
@@ -379,12 +488,22 @@
 ;; calling function. Otherwise, an error will be thrown.
 ;;
 ;; The body of the def-op can contain completely arbitrary code. The functions
-;; recurse and recurse-splice are also locally defined, which simply call the
-;; lower function in the context of the current interpreter. The lower function
-;; can also be called with different interpreters to enable mutual recursion if
-;; desired. Local handlers can also be registered, which will dynamically
-;; override any set of handlers within the context of a recursive call to
-;; lower, in a similar vein to macrolet.
+;; recurse, recurse-splice, expr, and inherit-from are also locally defined:
+;;   recurse        -- (recurse x) lowers x with the current interpreter
+;;   recurse-splice -- (recurse-splice x) lowers x in splice context
+;;   expr           -- (expr) returns the original input expression
+;;   inherit-from   -- (inherit-from target source) tags TARGET with
+;;                     SOURCE's source-loc; useful when a handler wants to
+;;                     attribute a derived node to a specific sub-expression
+;;                     rather than letting auto-propagation use the whole
+;;                     input. First-wins semantics: a node only inherits if
+;;                     it doesn't already have a loc, so existing
+;;                     attributions are preserved.
+;;
+;; The lower function can be called with different interpreters to enable
+;; mutual recursion if desired. Local handlers can also be registered, which
+;; will dynamically override any set of handlers within the context of a
+;; recursive call to lower, in a similar vein to macrolet.
 ;;
 ;; See the examples below for ways of defining interpreters using def-op.
 ;;
@@ -433,8 +552,10 @@
               ',clause)
            (flet ((recurse (x) (lower ,interp x))
                   (recurse-splice (x) (lower ,interp x :splice t))
-                  (expr () ,expr))
-             (declare (ignorable #'recurse #'recurse-splice))
+                  (expr () ,expr)
+                  (inherit-from (target source) (inherit-loc target source)))
+             (declare (ignorable #'recurse #'recurse-splice
+                                 #'expr #'inherit-from))
              ,@body))))))
 
 ;; --- Local rule overrides ---
