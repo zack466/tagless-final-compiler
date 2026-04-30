@@ -30,10 +30,11 @@
   start-offset
   end-offset)
 
-(defvar *source-locations* (make-hash-table :test #'eq)
+(defvar *source-locations* (trivial-garbage:make-weak-hash-table :test #'eq :weakness :key)
   "Sidecar table: cons cell -> SOURCE-LOC. Populated by READ-WITH-LOCATIONS
    and by the propagating constructors. Lookups are O(1) and survive any
-   non-destructive transformation.")
+   non-destructive transformation. Uses a weak hash table so AST nodes
+   can be garbage collected.")
 
 (defun source-loc (form)
   "Look up the source location for FORM, or NIL if none is recorded.

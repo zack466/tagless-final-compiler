@@ -8,6 +8,7 @@
                #:eclector-concrete-syntax-tree
                #:cl-ansi-text
                #:cl-ppcre
+               #:trivial-garbage
                )
   :components ((:module "src"
                 :serial t
