@@ -156,7 +156,7 @@
          (renamed (mapcar #'recurse (filter body (node-is-not-p :global)))))
     (cons :module (append globals renamed))))
 
-(defparameter *blub-program* (car (read-sample "blub/1-shadowing.lisp")))
+(defparameter *blub-program* (car (read-example "blub/1-shadowing.lisp")))
 
 (multiple-value-bind (body trace) (with-trace (lower *blub-1* *blub-program*))
   (declare (ignore body))

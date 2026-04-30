@@ -16,6 +16,7 @@
                              (:file "util")
                              (:file "source")
                              (:file "interpreter")
+                             (:file "example")
                              (:file "qbe")))))
 
 (asdf:defsystem #:tagless-compiler/tests

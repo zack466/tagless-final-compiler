@@ -2,7 +2,7 @@
 (named-readtables:in-readtable tagless-compiler-syntax)
 
 (defparameter *hello-world*
-  (first (read-program "qbe/hello_world.lisp")))
+  (first (read-example "qbe/hello_world.lisp")))
 
 (format t "~a~%" (lower *qbe* *hello-world*))
 

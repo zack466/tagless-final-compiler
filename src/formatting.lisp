@@ -39,6 +39,7 @@
             (cl-ansi-text:with-color (color :stream s
                                             :style :background)
               (princ string s))))))
+
 ;; Convenience shorthands for the common cases. Each accepts an optional
 ;; :bright flag rather than the more verbose :effect :bright since that's
 ;; the only effect we use 99% of the time.
@@ -53,9 +54,7 @@
 (defun gray    (s)             (colorize s :white)) ; dim white reads as gray on most terminals
 
 (defun bold      (s) (if *use-color* (cl-ansi-text:white s :effect :bright) s))
-(defun underline (s) (if *use-color*
-                         (format nil "~C[4m~A~C[0m" #\Esc s #\Esc)
-                         s))
+(defun underline (s) (if *use-color* (format nil "~C[4m~A~C[0m" #\Esc s #\Esc) s))
 
 ;; Semantic helpers — use these in diagnostic output so the color scheme
 ;; lives in exactly one place. If you later decide errors should be magenta
@@ -77,9 +76,31 @@
    carets). Bright red so it stands out against the highlighted source."
   (red string :bright t))
 
+(defun %shorten-path (path)
+  "Return a display-friendly form of PATH. If PATH is under the current
+   working directory, return it relative to CWD (without a leading './').
+   Otherwise return the absolute namestring unchanged. Non-pathname or
+   unparseable inputs are coerced to a string and returned as-is."
+  (handler-case
+      (let* ((path-pn (pathname path))
+             ;; Resolve to absolute so a relative input still gets compared
+             ;; against CWD on equal footing.
+             (abs-pn  (merge-pathnames path-pn (uiop:getcwd)))
+             (cwd     (uiop:getcwd)))
+        (if (uiop:subpathp abs-pn cwd)
+            (namestring (uiop:enough-pathname abs-pn cwd))
+            (namestring abs-pn)))
+    (error ()
+      ;; Anything weird (a string that isn't a valid path, etc.) — fall
+      ;; back to the original input. Diagnostics should never themselves
+      ;; throw.
+      (princ-to-string path))))
+
 (defun filename (string)
-  "Color a filename in diagnostic output."
-  (underline (cyan string)))
+  "Color a filename in diagnostic output. If the path is under the current
+   working directory, it's shown relative to CWD; otherwise the full
+   absolute path is shown. The result is underlined cyan."
+  (underline (cyan (%shorten-path string))))
 
 ;; ---------------------------------------------------------------------------
 ;; Syntax highlighting
@@ -191,4 +212,5 @@
         (write-string source out :start pos :end len)))))
 
 (defun lisp-to-string (expr)
+  "Converts an sexp to a string before highlighting it"
   (highlight-lisp (format nil "~S" expr)))

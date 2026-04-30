@@ -67,7 +67,7 @@
            (if (or (/= (source-loc-start-line loc) (source-loc-end-line loc))
                    (/= (source-loc-start-col loc) (source-loc-end-col loc)))
                (format stream "~A:~D:~D-~D:~D"
-                       (first parts) (second parts) (third parts)
+                       (filename (first parts)) (second parts) (third parts)
                        (source-loc-end-line loc)
                        (source-loc-end-col loc))
                (format stream "~A:~D:~D"
@@ -203,7 +203,7 @@
   (asdf:system-relative-pathname "tagless-compiler"
                                  (format nil "examples/~A" name)))
 
-(defun read-program (name)
+(defun read-example (name)
   "Read forms with locations from examples/NAME."
   (read-file-with-locations (example-pathname name)))
 
@@ -404,7 +404,7 @@
                    (format stream "  ~vA | ~vA~A~%"
                            gutter ""
                            (1- c-start) ""
-                           (red (make-string caret-count :initial-element #\^))))))
+                           (gutter (make-string caret-count :initial-element #\^))))))
         (loop for ln from win-start to win-end do
           (print-line ln)
           (when (and (>= ln start-ln) (<= ln end-ln))
