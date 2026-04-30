@@ -169,3 +169,10 @@ Added nice things:
 - source locations for all sexprs in language
 - syntax highlighting for better looking outputs / error messages.
 - hella tests (look over to see if they are reasonable)
+
+TODO:
+- look over all AI code, check if anything is unnecessary
+- unify test framework, organize better (unit tests per file, and also integration/regression tests)
+- could write a macro that validates an AST using an sexp that defines the syntax, instead of a bunch of validator interpreters
+- finish blub language, implement more fun features on top of it (like fil-c)
+- fix all compiler warnings
