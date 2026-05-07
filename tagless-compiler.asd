@@ -15,6 +15,7 @@
                 :components ((:file "package")
                              (:file "formatting")
                              (:file "util")
+                             (:file "env")
                              (:file "source")
                              (:file "grammar")
                              (:file "meta-grammar")
@@ -29,6 +30,7 @@
                 :serial t
                 :components ((:file "tests")
                              (:file "test-grammar")
+                             (:file "test-env")
                              (:file "test-meta-grammar")
                              (:file "test-cst")
                              (:file "test-context")
