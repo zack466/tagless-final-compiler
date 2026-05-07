@@ -201,7 +201,7 @@
     (deftest function-with-args-and-body
       (assert-grammar
         '(:function (:type :int) qbe_main
-                    (:args (:type :int) x)
+                    (:args ((:type :int) x))
                     (:block
                       (:declare (:type :int) y 2)
                       (:assign y (:add (:var x) (:var y)))))
@@ -279,7 +279,7 @@
     (deftest function-with-control-flow
       (assert-grammar
         '(:function (:type :int) max
-                    (:args (:type :int) a (:type :int) b)
+                    (:args ((:type :int) a) ((:type :int) b))
                     (:block
                       (:if (:gt (:var a) (:var b))
                            (:block (:return (:var a)))

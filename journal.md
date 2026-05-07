@@ -190,3 +190,9 @@ TODO:
 - TODO: have a restart-based "effects hook" within passes that make's it more clean to maintain state within a pass (less messy than dynamic variables)
 - TODO: more examples
 - TODO: unify test framework
+
+# 5/7/26
+- Added `validate-blub` logic and moved `*blub-grammar*` to `blub.lisp`.
+- Simplified the `validate-qbe` pass by replacing the custom interpreter completely with a precisely generated `*qbe-grammar*`.
+- Added the `(any)` and `(list ...)` combinators to the grammar system.
+- Fixed a bug in `*blub-1*` related to function blocks and function argument parsing to correctly conform to the newly generated `*blub-grammar*`.

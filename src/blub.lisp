@@ -1,6 +1,112 @@
 (in-package #:tagless-compiler)
 (named-readtables:in-readtable tagless-compiler-syntax)
 
+(defparameter *blub-grammar*
+  '((:module
+     (repeat0 (option :function :global :block)))
+
+    (:function
+     :type (identifier) :args :block)
+
+    (:args
+     (repeat0 (list :type (identifier))))
+
+    (:block
+     (repeat0 :statement))
+
+    ;; Abstract: a statement is any of these concrete forms.
+    (:statement
+     (dispatch (option :declare
+                       :assign
+                       :expr
+                       :if
+                       :while
+                       :return
+                       :break
+                       :continue)))
+
+    (:declare
+     :type (identifier) (maybe :expr))
+
+    (:assign
+     (identifier) :expr)
+
+    (:global
+     :type (identifier) (maybe :expr))
+
+    ;; Control flow.
+    (:if       :expr :block (maybe :block))   ; condition, then, optional else
+    (:while    :expr :block)
+    (:return   (maybe :expr))
+    (:break)
+    (:continue)
+
+    (:type
+     (option
+      (keyword :void)
+      (keyword :char)
+      (keyword :int)
+      (keyword :double)
+      (keyword :boolean)
+      :pointer))
+
+    (:pointer :type)
+
+    ;; Expressions. :expr dispatches to one concrete kind, with no wrapper.
+    (:expr
+     (dispatch
+      (option
+       (literal)
+       :var
+       (keyword :true)
+       (keyword :false)
+       ;; Unary
+       :neg :not :deref :addr-of
+       ;; Bitwise / arithmetic binary
+       :add :sub :mul :div :and :or :xor
+       ;; Comparison
+       :eq :ne :lt :le :gt :ge
+       ;; Logical
+       :logand :logor
+       ;; Function call
+       :call)))
+
+    (:var      (identifier))
+
+    ;; Unary operators.
+    (:neg      :expr)
+    (:not      :expr)
+    (:deref    :expr)
+    (:addr-of  :expr)
+
+    ;; Binary arithmetic / bitwise.
+    (:add      :expr :expr)
+    (:sub      :expr :expr)
+    (:mul      :expr :expr)
+    (:div      :expr :expr)
+    (:and      :expr :expr)
+    (:or       :expr :expr)
+    (:xor      :expr :expr)
+
+    ;; Comparisons.
+    (:eq       :expr :expr)
+    (:ne       :expr :expr)
+    (:lt       :expr :expr)
+    (:le       :expr :expr)
+    (:gt       :expr :expr)
+    (:ge       :expr :expr)
+
+    ;; Logical (short-circuiting in C).
+    (:logand   :expr :expr)
+    (:logor    :expr :expr)
+
+    ;; Function call: name followed by zero or more argument expressions.
+    (:call     (identifier) (repeat0 :expr))))
+
+(defun validate-blub (ast)
+  (match-grammar ast :module *blub-grammar*)
+  ast)
+
 ;; Blub (c-like language)
 (defparameter *blub* (make-interpreter :on-unknown :passthrough))
 
@@ -37,22 +143,13 @@
 ;; - resolve all struct definitions, determine total size, plus size and offset of each field
 ;; - cps transformation from nested statements into SSA
 ;;
-;; Rough grammar:
-;;
-;; BLUB ::= MODULE [FUNCTION | GLOBAL | STRUCT_DEF]*
-;;
-;; GLOBAL ::= (GLOBAL_TYPE GLOBAL_NAME) [GLOBAL_VALUE]
-;;
-;; STRUCT_DEFS ::= STRUCT_NAME ((FIELD_TYPE FIELD_NAME)*)
-;;
-;; FUNCTION ::= OUT_TYPE FUNCTION_NAME ((ARG_TYPE ARG_NAMES)*) STATEMENT*
-
+;; Note: The exact grammar of the Blub AST is specified above in *BLUB-GRAMMAR*.
+;; Use VALIDATE-BLUB to ensure an AST conforms to this grammar before processing.
 
 ;; Define individual passes within the blub language
 
 ;; Blub pass: desugaring
 ;; - desugar combined declaration / assignment
-;; - check that AST syntax is correct (like for function arguments and stuff)
 (defparameter *blub-0* (make-interpreter :on-unknown :recurse))
 
 ;;;; Blub pass: rename variables
@@ -104,13 +201,13 @@
     (unless found (error "Variable ~A but not yet declared: ~A." kind name))
     mapped))
 
-(def-op *blub-1* (:global (type name) &optional value)
+(def-op *blub-1* (:global type name &optional value)
   (register-global name)
   (let ((type-name (list type name)))
     (inherit-from type-name (expr))
-    (list :global type-name (recurse value))))
+    (list :global type name (recurse value))))
 
-(def-op *blub-1* (:declare (type name) &optional value)
+(def-op *blub-1* (:declare type name &optional value)
   ;; Recurse on VALUE *before* updating the map, so a self-referential
   ;; declaration like (:declare (int x) (:var x)) resolves :var x
   ;; against the OUTER scope's binding
@@ -118,7 +215,7 @@
          (new-name      (register-local name))
          (type-name     (list type new-name)))
     (inherit-from type-name (expr))
-    (list :declare type-name lowered-value)))
+    (list :declare type new-name lowered-value)))
 
 (def-op *blub-1* (:assign name value)
   (list :assign (lookup-or-error name "assigned") (recurse value)))
@@ -129,23 +226,24 @@
 (def-op *blub-1* (:block &rest body)
   ;; Fresh dynamic binding initialized from outer scope, so changes don't leak
   ;; out.
-  (let ((*var-rename-map* *var-rename-map*))
-    (cons :block (mapcar #'recurse body))))
+  ; (let ((*var-rename-map* *var-rename-map*))
+    (cons :block (mapcar #'recurse body)))
 
-(def-op *blub-1* (:function type name (&rest args) &rest body)
-  (let ((*var-rename-map* *var-rename-map*))
+(def-op *blub-1* (:function type name args block)
+  ; (let ((*var-rename-map* *var-rename-map*))
     ;; Each ARG is a (type name) pair; we register the name (which may shadow
     ;; an outer global with the same name) and rebuild the pair using the
     ;; chosen new name.
     (let ((renamed-args
-            (mapcar (lambda (arg)
-                      (destructuring-bind (arg-type arg-name) arg
-                        (let* ((new-name  (register-local arg-name))
-                               (new-pair  (list arg-type new-name)))
-                          (inherit-from new-pair arg)
-                          new-pair)))
-                    args)))
-      (list :function type name renamed-args (mapcar #'recurse body)))))
+            (cons :args
+                  (mapcar (lambda (arg)
+                            (destructuring-bind (arg-type arg-name) arg
+                              (let* ((new-name  (register-local arg-name))
+                                     (new-pair  (list arg-type new-name)))
+                                (inherit-from new-pair arg)
+                                new-pair)))
+                          (cdr args)))))
+      (list :function type name renamed-args (recurse block))))
 
 (def-op *blub-1* (:module &rest body)
   ;; Fresh empty map at module scope. Globals are processed first so
@@ -156,11 +254,15 @@
          (renamed (mapcar #'recurse (filter body (node-is-not-p :global)))))
     (cons :module (append globals renamed))))
 
-(defparameter *blub-program* (car (read-example "blub/1-shadowing.lisp")))
+; (defparameter *blub-program* (car (read-example "blub/1-shadowing.lisp")))
 
-(multiple-value-bind (body trace) (with-trace (lower *blub-1* *blub-program*))
-  (declare (ignore body))
-  (print-trace trace))
+; (validate-blub *blub-program*)
+;
+; (multiple-value-bind (body trace) (with-trace (lower *blub-1* *blub-program*))
+;   (declare (ignore body))
+;   (print-trace trace))
+;
+; (format t "~S~%" (lisp-to-string (lower *blub-1* *blub-program*)))
 
 ;; Blub pass: resolve functions/structs
 (def-op *blub-1* (:module &body body)

@@ -2,19 +2,18 @@
 
 ;; --- QBE language ---
 ;;
-;; Two interpreters:
+;; AST generation and validation pipeline:
 ;;
-;;   *qbe-validate*  walks the AST and signals QBE-VALIDATION-ERROR on
-;;                   any shape or type violation. Source locations are
-;;                   looked up in error reports. The validator does not
-;;                   produce a useful return value; it's run for its
-;;                   side effect (signaling).
+;;   *qbe-grammar*   A grammar system specification that ensures AST nodes
+;;                   match exactly the layout and shapes QBE expects.
+;;                   `validate-qbe` runs the AST through this grammar and
+;;                   signals `match-error` on violations.
 ;;
-;;   *qbe*           prints a validated AST to a string. It still calls
-;;                   the validation helpers as a safety net, so running
-;;                   the printer on un-validated AST fails loudly with
-;;                   the same source-loc-aware error rather than
-;;                   silently producing bad output.
+;;   *qbe*           An interpreter that prints a validated AST to a string.
+;;                   It still calls basic validation helpers as a safety net, 
+;;                   so running the printer on un-validated AST fails loudly
+;;                   with source-loc-aware errors rather than silently
+;;                   producing bad output.
 ;;
 ;; The intended pipeline is:
 ;;
@@ -78,6 +77,107 @@
 (defparameter *qbe-effect-opcodes*
   '(:storeb :stored :storeh :storel :stores :storew
     :blit :vastart))
+
+;; -----------------------------------------------------------------------------
+;; QBE AST Grammar
+;; -----------------------------------------------------------------------------
+
+(defparameter *qbe-grammar*
+  `((:module
+     (repeat0 (option :type :opaque :union-type :data :function)))
+
+    (:type
+     :user-type (any) (repeat0 :field))
+
+    (:opaque
+     :user-type (any) (any))
+
+    (:union-type
+     :user-type (any) (repeat0 :union))
+
+    (:union
+     (repeat0 :field))
+
+    (:data
+     (identifier) (any) (any) (repeat0 :data-item))
+
+    (:function
+     (identifier) (any) (maybe :abity) (repeat0 :param) (repeat0 :block))
+
+    (:field
+     :ext-type (maybe (any)))
+
+    (:data-item
+     :ext-type (repeat0 (any)))
+
+    (:param
+     (option
+      ((keyword :...))
+      ((keyword :env) (any))
+      (:abity (maybe (any)))))
+
+    (:block
+     :label (repeat0 (option :assign :instr :call-assign :call :phi))
+     (option :jmp :jnz :ret :hlt))
+
+    (:jmp :label)
+    (:jnz :value :label :label)
+    (:ret (maybe :value))
+    (:hlt)
+
+    (:assign
+     :temp :base-type :assign-op (repeat0 :value))
+
+    (:instr
+     :effect-op (repeat0 :value))
+
+    (:call-assign
+     :temp :abity :value (repeat0 :call-arg))
+
+    (:call
+     :value (repeat0 :call-arg))
+
+    (:call-arg
+     (option
+      ((keyword :...))
+      ((keyword :env) :value)
+      (:abity :value)))
+
+    (:phi
+     :temp :base-type (repeat0 :phi-arg))
+
+    (:phi-arg
+     :label :value)
+
+    (:label (option (:label (any))))
+    (:temp (option (:temp (any))))
+    (:user-type (option (:user-type (any))))
+    (:value
+     (option
+      (:temp (any))
+      (:global (any) (maybe (any)))
+      (:thread (any))
+      (literal)))
+
+    (:abity
+     (option
+      (dispatch (option ,@(mapcar (lambda (x) `(keyword ,x)) *qbe-base-types*)))
+      (dispatch (option ,@(mapcar (lambda (x) `(keyword ,x)) *qbe-subw-types*)))
+      :user-type
+      (string)
+      (identifier)))
+
+    (:base-type
+     (dispatch (option ,@(mapcar (lambda (x) `(keyword ,x)) *qbe-base-types*))))
+
+    (:ext-type
+     (dispatch (option ,@(mapcar (lambda (x) `(keyword ,x)) *qbe-ext-types*))))
+
+    (:assign-op
+     (dispatch (option ,@(mapcar (lambda (x) `(keyword ,x)) *qbe-assign-opcodes*))))
+
+    (:effect-op
+     (dispatch (option ,@(mapcar (lambda (x) `(keyword ,x)) *qbe-effect-opcodes*))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Type predicates
@@ -173,159 +273,10 @@
 ;; T from successful checks; the return value is unused.
 ;; -----------------------------------------------------------------------------
 
-(defparameter *qbe-validate*
-  (make-interpreter :on-unknown :error
-                    :propagate-source-locations nil))
-
-;; --- Sigils ---
-
-(def-op *qbe-validate* (:global name &optional offset)
-  t)
-
-(def-op *qbe-validate* (:thread name) t)
-(def-op *qbe-validate* (:temp name)   t)
-(def-op *qbe-validate* (:label name)  t)
-(def-op *qbe-validate* (:user-type name) t)
-
-;; --- Top-level declarations ---
-
-(def-op *qbe-validate* (:module &rest decls)
-  (mapc #'recurse decls)
-  t)
-
-(def-op *qbe-validate* (:type name align &rest fields)
-  (dolist (f fields)
-    (check-cons-with-head f :field (expr) ":type field")
-    (recurse f))
-  t)
-
-(def-op *qbe-validate* (:opaque name align size)
-  t)
-
-(def-op *qbe-validate* (:union-type name align &rest variants)
-  (dolist (v variants)
-    (check-cons-with-head v :union (expr) ":union-type variant")
-    (recurse v))
-  t)
-
-(def-op *qbe-validate* (:union &rest variants)
-  (dolist (v variants)
-    (check-cons-with-head v :field (expr) ":union variant field")
-    (recurse v))
-  t)
-
-(def-op *qbe-validate* (:data name linkage align &rest items)
-  (dolist (item items)
-    (check-cons-with-head item :data-item (expr) ":data item")
-    (recurse item))
-  t)
-
-(def-op *qbe-validate* (:function name linkage ret-type params &rest blocks)
-  ;; ret-type may be nil (void) or any ABITY.
-  (when ret-type
-    (check-abity ret-type (expr) ":function return type"))
-  (dolist (p params)
-    (check-cons-with-head p :param (expr) ":function param")
-    (recurse p))
-  (dolist (b blocks)
-    (check-cons-with-head b :block (expr) ":function body")
-    (recurse b))
-  t)
-
-(def-op *qbe-validate* (:field type &optional count)
-  (check-ext-type type (expr) ":field")
-  t)
-
-(def-op *qbe-validate* (:data-item type &rest vals)
-  (check-ext-type type (expr) ":data-item")
-  (when (eq type :z)
-    (unless (= (length vals) 1)
-      (qbe-error (expr)
-                 ":z data-item takes exactly one size argument; got ~D."
-                 (length vals))))
-  t)
-
-(def-op *qbe-validate* (:param type &optional name)
-  (cond ((eq type :...) t)
-        ((eq type :env) t)
-        (t (check-abity type (expr) ":param")))
-  t)
-
-;; --- Blocks and control flow ---
-
-(def-op *qbe-validate* (:block name &rest instrs)
-  (mapc #'recurse instrs)
-  t)
-
-(def-op *qbe-validate* (:jmp label) (recurse label) t)
-
-(def-op *qbe-validate* (:jnz val label-true label-false)
-  (recurse val)
-  (recurse label-true)
-  (recurse label-false)
-  t)
-
-(def-op *qbe-validate* (:ret &optional val)
-  (when val (recurse val))
-  t)
-
-(def-op *qbe-validate* (:hlt) t)
-
-;; --- Instructions ---
-
-(def-op *qbe-validate* (:assign var type op &rest args)
-  (check-base-type type (expr) ":assign")
-  (check-assign-opcode op (expr))
-  (mapc #'recurse args)
-  t)
-
-(def-op *qbe-validate* (:instr op &rest args)
-  (check-effect-opcode op (expr))
-  (mapc #'recurse args)
-  t)
-
-;; --- Calls ---
-
-(def-op *qbe-validate* (:call-assign var type target &rest args)
-  (check-abity type (expr) ":call-assign return type")
-  (recurse target)
-  (dolist (a args)
-    (check-cons-with-head a :call-arg (expr) ":call-assign argument")
-    (recurse a))
-  t)
-
-(def-op *qbe-validate* (:call-arg type val)
-  (cond ((eq type :...) t)
-        ((eq type :env) (recurse val))
-        (t (check-abity type (expr) ":call-arg")
-           (recurse val)))
-  t)
-
-(def-op *qbe-validate* (:call target &rest args)
-  (recurse target)
-  (dolist (a args)
-    (check-cons-with-head a :call-arg (expr) ":call argument")
-    (recurse a))
-  t)
-
-;; --- Phi ---
-
-(def-op *qbe-validate* (:phi var type &rest args)
-  (check-base-type type (expr) ":phi")
-  (when (oddp (length args))
-    (qbe-error (expr)
-               ":phi expects pairs of (label value); got ~D arguments (odd)."
-               (length args)))
-  ;; Each pair: (label-form value-form). Recurse on both halves.
-  (loop for (lbl val) on args by #'cddr
-        do (when lbl (recurse lbl))
-           (when val (recurse val)))
-  t)
-
 (defun validate-qbe (ast)
-  "Validate AST. Signals QBE-VALIDATION-ERROR on the first violation
-   found. Returns AST on success (so this can be used in a pipeline)."
-  (lower *qbe-validate* ast)
+  "Validate AST using the QBE grammar. Signals MATCH-ERROR on violation.
+   Returns AST on success."
+  (match-grammar ast :module *qbe-grammar*)
   ast)
 
 ;; -----------------------------------------------------------------------------

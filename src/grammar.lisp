@@ -57,7 +57,7 @@
   (and (symbolp rule) (keywordp rule)))
 
 (defparameter *combinators*
-  '(keyword identifier symbol literal maybe option repeat0 dispatch)
+  '(keyword identifier symbol literal maybe option repeat0 dispatch any list)
   "Symbols that, when at the head of a list, mark the list as a combinator
    rather than an implicit sequence.")
 
@@ -96,11 +96,13 @@
 ;;; - (identifier)                      - matches any symbol that is not a keyword or nil
 ;;; - (symbol)                          - matches any symbol
 ;;; - (literal)                         - matches any literal
+;;; - (any)                             - matches any single AST node without constraint
+;;; - (list <RULE1> <RULE2> ...)        - matches if the AST node is a list and its contents match the rules
 ;;; - (maybe <RULE>)                    - matches <RULE> or doesn't match at all
 ;;; - (option <RULE1> <RULE2> ...)      - tries all of the rules in order
 ;;; - (repeat0 <RULE>)                  - matches <RULE> exactly 0 or more times
-;;; - (dispatch <RULE1> <RULE2> ...)    - like option, but doesn't consume the head keyword.
-;;;                                       effectively makes the rule "virtual".
+;;; - (dispatch <RULE1>)                - matches <RULE> without consuming the current head keyword,
+;;;                                       essentially allowing for "virtual" grammar rules.
 ;;;
 ;;; A grammar is specified as a mapping from keywords to rules.
 ;;; A raw keyword on its own implicitly dispatches to it's associated rule.
@@ -160,6 +162,26 @@
 
        (literal
         (if (and (consp ast) (literal-p (car ast)))
+            (values t (car ast) (cdr ast))
+            (signal-match-error ast rule)))
+
+       (list
+        ;; Matches if the current AST element is a list and its contents
+        ;; match the sequence of rules inside this combinator.
+        (if (consp ast)
+            (let ((sub (car ast)))
+              (if (listp sub)
+                  (multiple-value-bind (success matched remaining-sub)
+                      (match-sequence-prefix sub (cdr rule) rules)
+                    (if (and success (null remaining-sub))
+                        (values t sub (cdr ast))
+                        (signal-match-error ast rule)))
+                  (signal-match-error ast rule)))
+            (signal-match-error ast rule)))
+
+       (any
+        ;; Match absolutely anything (one element).
+        (if (consp ast)
             (values t (car ast) (cdr ast))
             (signal-match-error ast rule)))
 
@@ -268,110 +290,8 @@
 ;;; ---------------------------------------------------------------------------
 ;;; The grammar
 ;;;
-;;; Compound patterns that used to be inline anonymous sequences (like the
+;;; compound patterns that used to be inline anonymous sequences (like the
 ;;; binary operations in :expr) are now their own named rules. This keeps
 ;;; the matching semantics simple: every "thing" in the AST is a wrapped
 ;;; sub-node referenced by keyword.
 ;;; ---------------------------------------------------------------------------
-
-(defparameter *blub-grammar*
-  '((:module
-     (repeat0 (option :function :global)))
-
-    (:function
-     :type (identifier) :args :block)
-
-    (:args
-     (repeat0 (:type (identifier))))
-
-    (:block
-     (repeat0 :statement))
-
-    ;; Abstract: a statement is any of these concrete forms.
-    (:statement
-     (dispatch (option :declare
-                       :assign
-                       :expr
-                       :if
-                       :while
-                       :return
-                       :break
-                       :continue)))
-
-    (:declare
-     :type (identifier) (maybe :expr))
-
-    (:assign
-     (identifier) :expr)
-
-    (:global
-     :type (identifier) (maybe :expr))
-
-    ;; Control flow.
-    (:if       :expr :block (maybe :block))   ; condition, then, optional else
-    (:while    :expr :block)
-    (:return   (maybe :expr))
-    (:break)
-    (:continue)
-
-    (:type
-     (option
-      (keyword :void)
-      (keyword :char)
-      (keyword :int)
-      (keyword :double)
-      (keyword :boolean)
-      :pointer))
-
-    (:pointer :type)
-
-    ;; Expressions. :expr dispatches to one concrete kind, with no wrapper.
-    (:expr
-     (dispatch
-      (option
-       (literal)
-       :var
-       (keyword :true)
-       (keyword :false)
-       ;; Unary
-       :neg :not :deref :addr-of
-       ;; Bitwise / arithmetic binary
-       :add :sub :mul :div :and :or :xor
-       ;; Comparison
-       :eq :ne :lt :le :gt :ge
-       ;; Logical
-       :logand :logor
-       ;; Function call
-       :call)))
-
-    (:var      (identifier))
-
-    ;; Unary operators.
-    (:neg      :expr)
-    (:not      :expr)
-    (:deref    :expr)
-    (:addr-of  :expr)
-
-    ;; Binary arithmetic / bitwise.
-    (:add      :expr :expr)
-    (:sub      :expr :expr)
-    (:mul      :expr :expr)
-    (:div      :expr :expr)
-    (:and      :expr :expr)
-    (:or       :expr :expr)
-    (:xor      :expr :expr)
-
-    ;; Comparisons.
-    (:eq       :expr :expr)
-    (:ne       :expr :expr)
-    (:lt       :expr :expr)
-    (:le       :expr :expr)
-    (:gt       :expr :expr)
-    (:ge       :expr :expr)
-
-    ;; Logical (short-circuiting in C).
-    (:logand   :expr :expr)
-    (:logor    :expr :expr)
-
-    ;; Function call: name followed by zero or more argument expressions.
-    (:call     (identifier) (repeat0 :expr))))

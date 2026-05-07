@@ -20,7 +20,8 @@
                              (:file "meta-grammar")
                              (:file "interpreter")
                              (:file "example")
-                             (:file "qbe")))))
+                             (:file "qbe")
+                             (:file "blub")))))
 
 (asdf:defsystem #:tagless-compiler/tests
   :depends-on (#:tagless-compiler)

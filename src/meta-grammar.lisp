@@ -35,6 +35,8 @@
        (maybe    (list :maybe (pattern->ast (cadr pattern))))
        (repeat0  (list :repeat0 (pattern->ast (cadr pattern))))
        (dispatch (list :dispatch (pattern->ast (cadr pattern))))
+       (any      (list :any))
+       (list     (list :list (cons :patterns (mapcar #'pattern->ast (cdr pattern)))))
        ;; Implicit sequence: not a recognized combinator head.
        (otherwise
         (cons :seq (mapcar #'pattern->ast pattern)))))
@@ -64,15 +66,18 @@
     ;; A pattern is one of the wrapped forms.
     (:pattern
      (dispatch (option :ref :option :kw :identifier :symbol
-                       :literal :maybe :repeat0 :dispatch :seq)))
+                       :literal :maybe :repeat0 :dispatch :seq :any :list)))
 
     (:ref        (symbol))                      ; (:ref :some-keyword)
     (:option     :patterns)                     ; (:option (:patterns p p p))
+    (:list       :patterns)                     ; (:list (:patterns p p p))
     (:patterns   (repeat0 :pattern))            ; (:patterns ...) holds the list
     (:kw         (symbol))                      ; (:kw :foo)
     (:identifier)                               ; (:identifier)
     (:symbol)                                   ; (:symbol)
     (:literal)                                  ; (:literal)
+    (:any)                                      ; (:any)
+    (:list       :patterns)                     ; (:list (:patterns p p p))
     (:maybe      :pattern)                      ; (:maybe x)
     (:repeat0    :pattern)                      ; (:repeat0 x)
     (:dispatch   :pattern)                      ; (:dispatch x)
