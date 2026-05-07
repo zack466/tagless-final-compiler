@@ -182,3 +182,11 @@ TODO:
 - more blub passes
 - get syntax tree more solidified
 - put languages / features in documentation (ex: for blub language)
+
+# 5/6/26
+- added grammar subsystem, verifying AST structure
+- TODO: blub language passes
+- TODO: specify preorder/postorder/inorder traversal for interpreter recursion (if def-op not specified)
+- TODO: have a restart-based "effects hook" within passes that make's it more clean to maintain state within a pass (less messy than dynamic variables)
+- TODO: more examples
+- TODO: unify test framework
