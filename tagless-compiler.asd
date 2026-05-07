@@ -16,6 +16,8 @@
                              (:file "formatting")
                              (:file "util")
                              (:file "source")
+                             (:file "grammar")
+                             (:file "meta-grammar")
                              (:file "interpreter")
                              (:file "example")
                              (:file "qbe")))))
@@ -25,6 +27,8 @@
   :components ((:module "test"
                 :serial t
                 :components ((:file "tests")
+                             (:file "test-grammar")
+                             (:file "test-meta-grammar")
                              (:file "test-cst")
                              (:file "test-context")
                              (:file "test-propagation")

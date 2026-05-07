@@ -176,3 +176,9 @@ TODO:
 - could write a macro that validates an AST using an sexp that defines the syntax, instead of a bunch of validator interpreters
 - finish blub language, implement more fun features on top of it (like fil-c)
 - fix all compiler warnings
+
+# 4/30/26
+TODO:
+- more blub passes
+- get syntax tree more solidified
+- put languages / features in documentation (ex: for blub language)

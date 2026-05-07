@@ -12,7 +12,8 @@ build:
 test:
 	rlwrap sbcl --load dev.lisp \
 		--eval '(in-package #:tagless-compiler)' \
-		--eval '(asdf:load-system :tagless-compiler/tests)'
+		--eval '(asdf:load-system :tagless-compiler/tests)' \
+		--eval '(sb-ext:exit)'
 
 clean:
 	rm src/*.fasl

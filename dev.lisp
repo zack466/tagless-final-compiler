@@ -16,4 +16,4 @@
   (asdf:load-asd asd-path))
 
 (asdf:load-system :tagless-compiler)
-(format t "~%[OK] Tagless Compiler loaded successfully in ~A!~%" *package*)
+(format t "~%[OK] Tagless Compiler loaded successfully!~%")
