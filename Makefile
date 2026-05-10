@@ -15,7 +15,16 @@ test:
 		--eval '(asdf:load-system :tagless-compiler/tests)' \
 		--eval '(sb-ext:exit)'
 
+examples:
+	rlwrap sbcl --load dev.lisp \
+		--eval '(in-package #:tagless-compiler)' \
+		--eval '(run-blub-examples)' \
+		--eval '(sb-ext:exit)'
+
 clean:
 	rm src/*.fasl
 
-.PHONY: repl test build clean
+clean-build:
+	rm -rf build/
+
+.PHONY: repl test build examples clean clean-build

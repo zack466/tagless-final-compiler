@@ -286,12 +286,3 @@
         (t
          (match-node ast top-level body rules))))
     t))
-
-;;; ---------------------------------------------------------------------------
-;;; The grammar
-;;;
-;;; compound patterns that used to be inline anonymous sequences (like the
-;;; binary operations in :expr) are now their own named rules. This keeps
-;;; the matching semantics simple: every "thing" in the AST is a wrapped
-;;; sub-node referenced by keyword.
-;;; ---------------------------------------------------------------------------

@@ -172,7 +172,7 @@ Added nice things:
 
 TODO:
 - look over all AI code, check if anything is unnecessary
-- unify test framework, organize better (unit tests per file, and also integration/regression tests)
+- unify test framework, organize better (unit tests per file, and also integration/regression tests), and also don't print out test names if all pass
 - could write a macro that validates an AST using an sexp that defines the syntax, instead of a bunch of validator interpreters
 - finish blub language, implement more fun features on top of it (like fil-c)
 - fix all compiler warnings
@@ -196,3 +196,16 @@ TODO:
 - Added the `(any)` and `(list ...)` combinators to the grammar system.
 - Fixed a bug in `*blub-1*` related to function blocks and function argument parsing to correctly conform to the newly generated `*blub-grammar*`.
 - Added `src/env.lisp` which exports `define-pass-context` for declaratively managing dynamic scope mapping bindings.
+
+# 5/7/26
+TODO:
+- look at cps/anf papers
+- finish blub passes (C -> QBE)
+- add struct to blub language
+- add function pointers to blub language
+- add "cast" expression
+
+# 5/10/26
+
+- blub passes mostly complete (needs code review)
+- still need to unify test framework, don't need to print out tests that pass
