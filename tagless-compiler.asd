@@ -28,7 +28,8 @@
   :depends-on (#:tagless-compiler)
   :components ((:module "test"
                 :serial t
-                :components ((:file "tests")
+                :components ((:file "harness")
+                             (:file "tests")
                              (:file "test-grammar")
                              (:file "test-env")
                              (:file "test-meta-grammar")

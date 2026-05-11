@@ -209,3 +209,7 @@ TODO:
 
 - blub passes mostly complete (needs code review)
 - still need to unify test framework, don't need to print out tests that pass
+
+# 5/10/26 (continued)
+
+- Successfully unified and fixed the test framework: all tests correctly run via `make test` without dropping into the debugger.

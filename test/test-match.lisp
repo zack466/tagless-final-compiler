@@ -1,8 +1,8 @@
 ;;;; Test &whole + match-pattern + match-cases.
 ;;;;
-;;;; This loads inline (mocked) versions of source-loc + the parser
-;;;; from v4/parser.lisp, and the macros from v4/util.lisp, so it
-;;;; doesn't need fset/eclector loaded.
+;;;; Kept in its own package because match-pattern / match-cases are
+;;;; legacy "v4" constructs that don't exist in the main package.
+;;;; The test framework mirrors the main harness (quiet on success).
 
 (defpackage #:m-test (:use #:cl))
 (in-package #:m-test)
@@ -124,8 +124,7 @@
                                  collect `(list ,(emit-param p) ,(thunk d))))
         :rest-var ,(emit-param (parsed-ll-rest-var parsed))
         :key-specs (list ,@(loop for (k v d) in (parsed-ll-key-specs parsed)
-                                 collect `(list ,k ',v ,(thunk d)))))))
-  )
+                                 collect `(list ,k ',v ,(thunk d))))))))
 
 (defun match-lambda-list (parsed args operator expression pattern)
   (flet ((fail ()
@@ -236,24 +235,35 @@
                                             collect (car c)))))))
          (inherit-loc ,g-result ,g-expr)))))
 
-;; --- Test framework ---
+;; --- Harness (quiet on success) ---
 
-(defvar *tests-run* 0) (defvar *tests-passed* 0) (defvar *failures* '())
+(defvar *suite-pass* 0)
+(defvar *suite-fail* 0)
 
-(defmacro deftest (name &body body)
-  `(progn
-     (incf *tests-run*)
-     (handler-case (progn ,@body
-                          (incf *tests-passed*)
-                          (format t "  PASS ~A~%" ',name))
-       (error (e)
-         (push (cons ',name e) *failures*)
-         (format t "  FAIL ~A: ~A~%" ',name e)))))
+(defmacro deftest (label &body body)
+  (let ((err (gensym "ERR")))
+    `(handler-case
+         (progn ,@body
+                (incf *suite-pass*))
+       (error (,err)
+         (incf *suite-fail*)
+         (format t "  FAIL  ~A~%        ~A~%" ,label ,err)))))
 
 (defun check (l e a)
-  (unless (equalp e a) (error "~A: expected ~S got ~S" l e a)))
-(defun check-true (l x) (unless x (error "~A: expected true" l)))
-(defun check-false (l x) (when x (error "~A: expected false got ~S" l x)))
+  (unless (equalp e a)
+    (error "~%  expected: ~S~%  but got:  ~S" e a)))
+(defun check-true (l x)
+  (unless x (error "~A: expected truthy but got: ~S" l x)))
+(defun check-false (l x)
+  (when x (error "~A: expected NIL but got: ~S" l x)))
+
+(defmacro defsuite (name &body tests)
+  `(let ((*suite-pass* 0) (*suite-fail* 0))
+     ,@tests
+     (let ((total (+ *suite-pass* *suite-fail*)))
+       (if (zerop *suite-fail*)
+           (format t "  ~A: ~D/~D passed~%" ,name *suite-pass* total)
+           (format t "  ~A: ~D/~D passed, ~D FAILED~%" ,name *suite-pass* total *suite-fail*)))))
 
 (defun tag (form file line)
   (setf (source-loc form)
@@ -265,144 +275,117 @@
 
 ;; --- Tests ---
 
-(defun run-tests ()
-  (setf *tests-run* 0 *tests-passed* 0 *failures* '())
-
-  (format t "~&=== &whole at top of nested pattern ===~%")
-
-  (deftest whole-binds-original-cons
+(defsuite "match-pattern: &whole"
+  (deftest "&whole binds original cons"
     (clear-source-locations)
-    (let* ((tn (tag (list 'int 'x) "f" 5))
+    (let* ((tn    (tag (list 'int 'x) "f" 5))
            (input (list :declare tn 0)))
-      ;; Match the input: (:declare (&whole pair type name) value)
       (match-pattern input (:declare (&whole pair type name) value)
-        (check "type extracted" 'int type)
-        (check "name extracted" 'x name)
-        (check "value extracted" 0 value)
-        (check "pair is original cons" t (eq pair tn))
+        (check "type" 'int type)
+        (check "name" 'x name)
+        (check "value" 0 value)
+        (check-true "pair is original" (eq pair tn))
         (check-true "pair has loc" (source-loc pair))
-        (check "pair's loc preserved" 5
-               (source-loc-start-line (source-loc pair)))
-        ;; Return something to verify match-pattern works
+        (check "pair loc line" 5 (source-loc-start-line (source-loc pair)))
         '(:done))))
 
-  (deftest whole-with-empty-input
+  (deftest "&whole with empty input binds nil"
     (clear-source-locations)
-    ;; Match an operator with no args; &whole on the (rest input) should
-    ;; bind to NIL.
     (match-pattern '(:noop) (:noop &whole all)
       (check "all is nil" nil all)
       'ok))
 
-  (format t "~&=== &whole at top level of match-pattern lambda list ===~%")
-
-  (deftest whole-top-level
-    ;; (match-pattern expr (:foo &whole all a b)) — `all` binds to
-    ;; the args list (rest expr).
+  (deftest "&whole at top level of lambda list"
     (match-pattern '(:foo 1 2) (:foo &whole all a b)
       (check "all is args" '(1 2) all)
       (check "a" 1 a)
       (check "b" 2 b)
       'ok))
 
-  (format t "~&=== &whole + &optional ===~%")
-
-  (deftest whole-with-optional
+  (deftest "&whole + &optional"
     (match-pattern '(:f 1) (:f &whole all a &optional (b 99))
       (check "all" '(1) all)
-      (check "a" 1 a)
+      (check "a"   1 a)
       (check "b default" 99 b)
       'ok))
 
-  (format t "~&=== &whole + &rest ===~%")
-
-  (deftest whole-with-rest
+  (deftest "&whole + &rest"
     (match-pattern '(:f 1 2 3 4) (:f &whole all a &rest tail)
-      (check "all" '(1 2 3 4) all)
-      (check "a" 1 a)
+      (check "all"  '(1 2 3 4) all)
+      (check "a"    1 a)
       (check "tail" '(2 3 4) tail)
       'ok))
 
-  (format t "~&=== Nested &whole keeps original cons through 2 levels ===~%")
-
-  (deftest nested-whole-deep
+  (deftest "nested &whole preserves both cons cells"
     (clear-source-locations)
-    ;; Build (:f (a (b 1)) end), tag the inner (b 1) and outer (a (b 1)).
     (let* ((inner (tag (list 'b 1) "f" 9))
            (outer (tag (list 'a inner) "f" 8))
-           (expr (list :f outer 'end)))
-      (match-pattern expr
-          (:f (&whole o a (&whole i b val)) tail)
-        (check "o is outer" t (eq o outer))
-        (check "i is inner" t (eq i inner))
+           (expr  (list :f outer 'end)))
+      (match-pattern expr (:f (&whole o a (&whole i b val)) tail)
+        (check-true "o is outer" (eq o outer))
+        (check-true "i is inner" (eq i inner))
         (check "outer loc" 8 (source-loc-start-line (source-loc o)))
         (check "inner loc" 9 (source-loc-start-line (source-loc i)))
         (check "leaves" '(a b 1) (list a b val))
-        (check "tail" 'end tail)
-        'ok)))
+        (check "tail"   'end tail)
+        'ok))))
 
-  (format t "~&=== match-pattern propagates loc to body result ===~%")
-
-  (deftest match-pattern-propagates-loc
+(defsuite "match-pattern: loc propagation"
+  (deftest "result inherits loc from expr"
     (clear-source-locations)
     (let* ((node (tag (list :double 7) "f" 11)))
       (let ((result (match-pattern node (:double n)
                       (list :pair n n))))
-        (check "result built" '(:pair 7 7) result)
+        (check "shape" '(:pair 7 7) result)
         (check-true "result tagged" (source-loc result))
-        (check "tagged from node" 11
-               (source-loc-start-line (source-loc result))))))
+        (check "tagged from node" 11 (source-loc-start-line (source-loc result))))))
 
-  (deftest match-pattern-doesnt-overwrite
-    ;; If body returns a cons that already has a loc, don't overwrite.
+  (deftest "existing loc on result is not overwritten"
     (clear-source-locations)
-    (let* ((node (tag (list :double 7) "outer" 11))
+    (let* ((node     (tag (list :double 7) "outer" 11))
            (existing (tag (list :preexisting) "inner" 99)))
       (let ((result (match-pattern node (:double n)
                       (declare (ignore n))
                       existing)))
-        (check "returned the existing form" t (eq result existing))
+        (check-true "same form" (eq result existing))
         (check "loc not overwritten" 99
                (source-loc-start-line (source-loc result))))))
 
-  (deftest match-pattern-mismatch-errors
-    ;; Wrong head should signal.
+  (deftest "mismatch on head signals"
     (handler-case
         (progn (match-pattern '(:other) (:declare a) a)
                (error "should have errored"))
       (malformed-operator-args () :ok)))
 
-  (deftest match-pattern-arity-mismatch-errors
-    ;; Right head, wrong arity.
+  (deftest "arity mismatch signals"
     (handler-case
         (progn (match-pattern '(:f 1 2 3) (:f a b) (list a b))
                (error "should have errored"))
-      (malformed-operator-args () :ok)))
+      (malformed-operator-args () :ok))))
 
-  (format t "~&=== match-cases: dispatch and propagation ===~%")
-
-  (deftest match-cases-first-clause
+(defsuite "match-cases: dispatch and propagation"
+  (deftest "first clause matches"
     (clear-source-locations)
     (let* ((expr (tag (list :add 1 2) "f" 3)))
       (let ((r (match-cases expr
                  ((:add a b) (list :sum a b))
                  ((:mul a b) (list :prod a b)))))
-        (check "first clause" '(:sum 1 2) r)
+        (check "shape" '(:sum 1 2) r)
         (check "loc propagated" 3 (source-loc-start-line (source-loc r))))))
 
-  (deftest match-cases-second-clause
+  (deftest "second clause matches"
     (let ((r (match-cases '(:mul 3 4)
                ((:add a b) (list :sum a b))
                ((:mul a b) (list :prod a b)))))
-      (check "second clause" '(:prod 3 4) r)))
+      (check "shape" '(:prod 3 4) r)))
 
-  (deftest match-cases-fallback
+  (deftest "t fallback"
     (let ((r (match-cases 'just-a-symbol
                ((:add a b) (list :sum a b))
                (t :catchall))))
       (check "fallback" :catchall r)))
 
-  (deftest match-cases-no-match-errors
+  (deftest "no match signals"
     (handler-case
         (progn (match-cases '(:xyz)
                  ((:add a b) (declare (ignore a b)) :sum)
@@ -410,10 +393,7 @@
                (error "should have errored"))
       (malformed-operator-args () :ok)))
 
-  (deftest match-cases-arity-error-doesnt-fall-through
-    ;; (:add) matches the head but has wrong arity. We shouldn't fall
-    ;; through to the catch-all -- a wrong-shaped match is a bug we
-    ;; want to surface.
+  (deftest "arity error does not fall through to t clause"
     (handler-case
         (progn (match-cases '(:add)
                  ((:add a b) (declare (ignore a b)) :sum)
@@ -421,67 +401,49 @@
                (error "should have errored, not fallen through"))
       (malformed-operator-args () :ok)))
 
-  (deftest match-cases-with-whole
+  (deftest "&whole inside match-cases"
     (clear-source-locations)
-    (let* ((tn (tag (list 'int 'y) "f" 12))
+    (let* ((tn   (tag (list 'int 'y) "f" 12))
            (expr (list :declare tn 5)))
       (let ((r (match-cases expr
                  ((:declare (&whole pair type name) val)
                   (declare (ignore type name val))
                   (list :got pair)))))
-        (check "got the cons" t (eq (second r) tn))
-        (check "loc still there" 12
-               (source-loc-start-line (source-loc (second r)))))))
+        (check-true "got original cons" (eq (second r) tn))
+        (check "loc preserved" 12
+               (source-loc-start-line (source-loc (second r))))))))
 
-  (format t "~&=== Errors from parser ===~%")
-
-  (deftest whole-not-first-errors
+(defsuite "match-pattern: parser error cases"
+  (deftest "&whole not first signals"
     (handler-case
         (progn (parse-lambda-list '(a &whole b))
                (error "should have errored"))
       (error () :ok)))
 
-  (deftest whole-needs-var-errors
+  (deftest "&whole without var signals"
     (handler-case
         (progn (parse-lambda-list '(&whole))
                (error "should have errored"))
       (error () :ok)))
 
-  (deftest whole-keyword-errors
+  (deftest "&whole keyword-var signals"
     (handler-case
         (progn (parse-lambda-list '(&whole :foo a))
                (error "should have errored"))
-      (error () :ok)))
+      (error () :ok))))
 
-  (format t "~&=== match-pattern in a more realistic handler-style use ===~%")
-
-  (deftest realistic-rebuild
-    ;; Simulate a handler that destructures a node, rebuilds it, and
-    ;; expects the rebuild to inherit the original loc automatically.
+(defsuite "match-pattern: realistic handler style"
+  (deftest "rebuild inherits outer loc, inner cons is unchanged"
     (clear-source-locations)
     (let* ((inner-pair (tag (list 'int 'x) "src" 7))
-           (decl (tag (list :declare inner-pair 5) "src" 7)))
+           (decl       (tag (list :declare inner-pair 5) "src" 7)))
       (let ((rebuilt
-              (match-pattern decl
-                  (:declare (&whole tn type name) val)
-                ;; Rebuild with new value: (:declare ORIGINAL-TN (* 2 val))
-                ;; tn keeps its loc; the outer (list :declare tn ...)
-                ;; cons is a fresh cons that will inherit from `decl`
-                ;; via match-pattern's auto-propagation.
+              (match-pattern decl (:declare (&whole tn type name) val)
                 (declare (ignore type name))
                 (list :declare tn (* 2 val)))))
         (check "shape" '(:declare (int x) 10) rebuilt)
-        (check "outer cons inherits" 7
+        (check "outer loc line" 7
                (source-loc-start-line (source-loc rebuilt)))
-        (check "inner pair is the original cons" t
-               (eq (second rebuilt) inner-pair))
-        (check "inner pair's loc preserved" 7
-               (source-loc-start-line (source-loc (second rebuilt)))))))
-
-  (format t "~&----~%~D/~D tests passed~%" *tests-passed* *tests-run*)
-  (when *failures*
-    (format t "Failures:~%")
-    (dolist (f *failures*) (format t "  ~A: ~A~%" (car f) (cdr f))))
-  (= *tests-passed* *tests-run*))
-
-(unless (run-tests) (sb-ext:exit :code 1))
+        (check-true "inner pair is original" (eq (second rebuilt) inner-pair))
+        (check "inner pair loc" 7
+               (source-loc-start-line (source-loc (second rebuilt))))))))

@@ -1,7 +1,8 @@
-;;;; Test the context snippet printer.
+;;;; Tests for the source context snippet printer.
 ;;;;
-;;;; We mock source-loc + the text cache to exercise print-source-context
-;;;; without needing Eclector.
+;;;; Kept in its own package because it has a simplified mock of
+;;;; print-source-context (no ANSI coloring, no filename header)
+;;;; that makes output predictable for string-based assertions.
 
 (defpackage #:ctx-test (:use #:cl))
 (in-package #:ctx-test)
@@ -45,7 +46,7 @@
 (defun find-source-text (key) (gethash key *source-texts*))
 (defun clear-texts () (clrhash *source-texts*))
 
-;; --- The function under test ---
+;; --- Simplified context printer (no ANSI, no filename header) ---
 
 (defun %split-lines (text)
   (let ((lines '()) (start 0))
@@ -75,14 +76,14 @@
                              (aref lines (1- line-num)) "")))
                  (format stream "~&  ~vD | ~A~%" gutter line-num lt)))
              (print-carets (line-num)
-               (let* ((lt (if (and (>= line-num 1) (<= line-num nlines))
-                              (aref lines (1- line-num)) ""))
-                      (ll (length lt))
+               (let* ((lt     (if (and (>= line-num 1) (<= line-num nlines))
+                                  (aref lines (1- line-num)) ""))
+                      (ll     (length lt))
                       (c-start (if (= line-num start-ln) (max 1 start-col) 1))
                       (c-end   (if (= line-num end-ln)
                                    (max c-start (1- end-col))
                                    (max c-start ll)))
-                      (cc (max 1 (1+ (- c-end c-start)))))
+                      (cc     (max 1 (1+ (- c-end c-start)))))
                  (format stream "~&  ~vA | ~vA~A~%"
                          gutter "" (1- c-start) ""
                          (make-string cc :initial-element #\^)))))
@@ -101,21 +102,39 @@
 (defun source-context (form &key (context 1))
   (print-source-context (source-loc-or-ancestor form) :context context))
 
-;; --- Test framework ---
+;; --- Harness (quiet on success) ---
 
-(defvar *tests-run* 0) (defvar *tests-passed* 0) (defvar *failures* '())
-(defmacro deftest (name &body body)
-  `(progn (incf *tests-run*)
-          (handler-case (progn ,@body (incf *tests-passed*)
-                               (format t "  PASS ~A~%" ',name))
-            (error (e) (push (cons ',name e) *failures*)
-                       (format t "  FAIL ~A: ~A~%" ',name e)))))
-(defun check (l e a)
-  (unless (equalp e a) (error "~A:~%  expected: ~S~%  got:      ~S" l e a)))
-(defun check-true (l x) (unless x (error "~A: expected true" l)))
-(defun check-false (l x) (when x (error "~A: expected false, got ~S" l x)))
-(defun has-substring (s sub)
-  (search sub s :test #'char=))
+(defvar *suite-pass* 0)
+(defvar *suite-fail* 0)
+
+(defmacro deftest (label &body body)
+  (let ((err (gensym "ERR")))
+    `(handler-case
+         (progn ,@body
+                (incf *suite-pass*))
+       (error (,err)
+         (incf *suite-fail*)
+         (format t "  FAIL  ~A~%        ~A~%" ,label ,err)))))
+
+(defun check (label expected actual)
+  (unless (equalp expected actual)
+    (error "~A~%  expected: ~S~%  but got:  ~S" label expected actual)))
+
+(defun check-true (label x)
+  (unless x (error "~A: expected truthy but got: ~S" label x)))
+
+(defun check-false (label x)
+  (when x (error "~A: expected NIL but got: ~S" label x)))
+
+(defun has-substring (s sub) (search sub s :test #'char=))
+
+(defmacro defsuite (name &body tests)
+  `(let ((*suite-pass* 0) (*suite-fail* 0))
+     ,@tests
+     (let ((total (+ *suite-pass* *suite-fail*)))
+       (if (zerop *suite-fail*)
+           (format t "  ~A: ~D/~D passed~%" ,name *suite-pass* total)
+           (format t "  ~A: ~D/~D passed, ~D FAILED~%" ,name *suite-pass* total *suite-fail*)))))
 
 ;; --- Helper ---
 
@@ -126,8 +145,6 @@
                    :start-offset 0 :end-offset 0))
 
 ;; --- Test source ---
-;;
-;; We register a known source text and build locs against it.
 
 (defparameter *test-source*
   (format nil "(:module~%  (:block~%    (:assign (:temp x) :bogus :add 1 2)~%    (:ret))~%  (:global \"pi\" 3.14))"))
@@ -140,94 +157,79 @@
 
 ;; --- Tests ---
 
-(defun run-tests ()
-  (setf *tests-run* 0 *tests-passed* 0 *failures* '())
-  (clear-locs) (clear-texts)
-  (register-source-text "test.blub" *test-source*)
-
-  (format t "~&=== Basic context printing ===~%")
-
-  (deftest single-line-span
-    ;; Error on line 3, columns 5-43 (the whole :assign form).
+(defsuite "source-context printer: basic"
+  (deftest "single-line span includes context lines and carets"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((loc (make-loc "test.blub" 3 5 3 43))
            (out (format-source-context loc)))
-      (check-true "output non-nil" out)
-      ;; Should contain line 2 (before), line 3 (error), carets, line 4 (after).
+      (check-true "non-nil" out)
       (check-true "has line 2" (has-substring out "(:block"))
       (check-true "has line 3" (has-substring out ":assign"))
       (check-true "has line 4" (has-substring out ":ret"))
-      (check-true "has carets" (has-substring out "^"))
-      (format t "    Output:~%~A" out)))
+      (check-true "has carets" (has-substring out "^"))))
 
-  (deftest caret-alignment
-    ;; Error on just the word :bogus on line 3 — cols 26-31.
+  (deftest "caret alignment"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((loc (make-loc "test.blub" 3 26 3 32))
            (out (format-source-context loc)))
-      (check-true "output non-nil" out)
-      ;; Carets should be 6 wide (cols 26-31) and indented 25 spaces.
-      (check-true "has carets" (has-substring out "^^^^^^"))
-      ;; Shouldn't have a huge run of carets — max around 6.
-      (check-false "not too many carets" (has-substring out "^^^^^^^^"))
-      (format t "    Output:~%~A" out)))
+      (check-true "non-nil" out)
+      (check-true "has 6 carets" (has-substring out "^^^^^^"))
+      (check-false "not 8+ carets" (has-substring out "^^^^^^^^"))))
 
-  (deftest first-line-no-before-context
-    ;; Error on line 1 — no line before to show.
+  (deftest "first-line: no line before context"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((loc (make-loc "test.blub" 1 1 1 9))
            (out (format-source-context loc)))
-      (check-true "output non-nil" out)
+      (check-true "non-nil" out)
       (check-true "has line 1" (has-substring out "(:module"))
       (check-true "has line 2" (has-substring out "(:block"))
-      (check-true "has carets" (has-substring out "^"))
-      (format t "    Output:~%~A" out)))
+      (check-true "has carets" (has-substring out "^"))))
 
-  (deftest last-line-no-after-context
-    ;; Error on line 5 — no line after.
+  (deftest "last-line: no line after context"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((loc (make-loc "test.blub" 5 3 5 27))
            (out (format-source-context loc)))
-      (check-true "has line 4" (has-substring out "(:ret"))
+      (check-true "has line 4" (has-substring out ":ret"))
       (check-true "has line 5" (has-substring out ":global"))
-      (check-true "has carets" (has-substring out "^"))
-      (format t "    Output:~%~A" out)))
+      (check-true "has carets" (has-substring out "^")))))
 
-  (format t "~&=== Multi-line span ===~%")
-
-  (deftest multi-line-span
-    ;; Error spanning lines 2-4 (the whole :block).
+(defsuite "source-context printer: multi-line"
+  (deftest "multi-line span shows all spanned lines with carets"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((loc (make-loc "test.blub" 2 3 4 11))
            (out (format-source-context loc)))
       (check-true "has line 1 context" (has-substring out "(:module"))
       (check-true "has line 2" (has-substring out "(:block"))
       (check-true "has line 3" (has-substring out ":assign"))
-      (check-true "has line 4" (has-substring out "(:ret"))
+      (check-true "has line 4" (has-substring out ":ret"))
       (check-true "has line 5 context" (has-substring out ":global"))
-      ;; Should have carets on lines 2, 3, and 4.
-      ;; Count caret lines: each caret line has ^ chars.
-      (let ((caret-count (count #\^ out)))
-        (check-true "multiple caret chars" (> caret-count 10)))
-      (format t "    Output:~%~A" out)))
+      (check-true "multiple caret chars" (> (count #\^ out) 10))))
 
-  (format t "~&=== More context ===~%")
-
-  (deftest context-2
-    ;; context=2 should show 2 lines before/after.
+  (deftest "context=2 extends window"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((loc (make-loc "test.blub" 3 5 3 43))
            (out (format-source-context loc :context 2)))
       (check-true "has line 1" (has-substring out "(:module"))
-      (check-true "has line 5" (has-substring out ":global"))
-      (format t "    Output:~%~A" out)))
+      (check-true "has line 5" (has-substring out ":global")))))
 
-  (format t "~&=== Edge cases ===~%")
-
-  (deftest nil-loc-returns-nil
+(defsuite "source-context printer: edge cases"
+  (deftest "nil loc returns nil"
     (check-false "nil" (format-source-context nil)))
 
-  (deftest unknown-file-returns-nil
+  (deftest "unknown file returns nil"
+    (clear-texts)
     (let ((loc (make-loc "nonexistent.blub" 1 1 1 5)))
       (check-false "no cached text" (format-source-context loc))))
 
-  (deftest source-context-from-form
-    ;; Test the convenience function that takes a form.
-    (clear-locs)
+  (deftest "source-context from form"
+    (clear-locs) (clear-texts)
+    (register-source-text "test.blub" *test-source*)
     (let* ((form (list :bad :stuff))
            (loc  (make-loc "test.blub" 3 5 3 43)))
       (setf (source-loc form) loc)
@@ -235,20 +237,4 @@
                    (let ((*standard-output* s))
                      (source-context form :context 1)))))
         (check-true "produced output" (has-substring out ":assign"))
-        (check-true "has carets" (has-substring out "^")))))
-
-  (format t "~&=== Visual check (for eyeballing) ===~%")
-
-  (deftest visual-check
-    (format t "~%    --- Expected output for :bogus at line 3, cols 26-32 ---~%")
-    (let ((loc (make-loc "test.blub" 3 26 3 32)))
-      (print-source-context loc :stream *standard-output* :context 1))
-    (format t "    --- end ---~%"))
-
-  (format t "~&----~%~D/~D tests passed~%" *tests-passed* *tests-run*)
-  (when *failures*
-    (format t "Failures:~%")
-    (dolist (f *failures*) (format t "  ~A: ~A~%" (car f) (cdr f))))
-  (= *tests-passed* *tests-run*))
-
-(unless (run-tests) (sb-ext:exit :code 1))
+        (check-true "has carets" (has-substring out "^"))))))
