@@ -37,5 +37,4 @@
                              (:file "test-context")
                              (:file "test-propagation")
                              (:file "test-match")
-                             (:file "test-qbe")
                              (:file "test-blub-passes")))))

@@ -76,3 +76,11 @@ variables."
        (if (zerop *suite-fail*)
            (format t "  ~A: ~D/~D passed~%" ,name *suite-pass* total)
            (format t "  ~A: ~D/~D passed, ~D FAILED~%" ,name *suite-pass* total *suite-fail*)))))
+
+(defun tag (form file line)
+  (setf (source-loc form)
+        (make-source-loc :file file :start-line line :start-col 1
+                         :end-line line :end-col 10
+                         :start-offset (* line 100)
+                         :end-offset (+ (* line 100) 10)))
+  form)
