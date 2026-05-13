@@ -13,7 +13,7 @@
                    :end-line el :end-col ec
                    :start-offset 0 :end-offset 0))
 
-(defun format-source-context (loc &key (context 1))
+(defun format-source-context-for-test (loc &key (context 1))
   (when loc
     (let* ((success nil)
            (out (with-output-to-string (s)
@@ -29,7 +29,7 @@
     (clrhash tagless-compiler::*source-texts*)
     (setf (gethash "test.blub" tagless-compiler::*source-texts*) *test-source*)
     (let* ((loc (make-loc "test.blub" 3 5 3 43))
-           (out (format-source-context loc)))
+           (out (format-source-context-for-test loc)))
       (check-true out)
       (check-true (has-substring out "(:block"))
       (check-true (has-substring out ":assign"))
@@ -40,7 +40,7 @@
     (clrhash tagless-compiler::*source-texts*)
     (setf (gethash "test.blub" tagless-compiler::*source-texts*) *test-source*)
     (let* ((loc (make-loc "test.blub" 3 26 3 32))
-           (out (format-source-context loc)))
+           (out (format-source-context-for-test loc)))
       (check-true out)
       (check-true (has-substring out "^^^^^^"))
       (check-false (has-substring out "^^^^^^^^"))))
@@ -49,7 +49,7 @@
     (clrhash tagless-compiler::*source-texts*)
     (setf (gethash "test.blub" tagless-compiler::*source-texts*) *test-source*)
     (let* ((loc (make-loc "test.blub" 1 1 1 9))
-           (out (format-source-context loc)))
+           (out (format-source-context-for-test loc)))
       (check-true out)
       (check-true (has-substring out "(:module"))
       (check-true (has-substring out "(:block"))
@@ -59,7 +59,7 @@
     (clrhash tagless-compiler::*source-texts*)
     (setf (gethash "test.blub" tagless-compiler::*source-texts*) *test-source*)
     (let* ((loc (make-loc "test.blub" 5 3 5 27))
-           (out (format-source-context loc)))
+           (out (format-source-context-for-test loc)))
       (check-true (has-substring out ":ret"))
       (check-true (has-substring out ":global"))
       (check-true (has-substring out "^")))))
@@ -69,7 +69,7 @@
     (clrhash tagless-compiler::*source-texts*)
     (setf (gethash "test.blub" tagless-compiler::*source-texts*) *test-source*)
     (let* ((loc (make-loc "test.blub" 2 3 4 11))
-           (out (format-source-context loc)))
+           (out (format-source-context-for-test loc)))
       (check-true (has-substring out "(:module"))
       (check-true (has-substring out "(:block"))
       (check-true (has-substring out ":assign"))
@@ -81,18 +81,18 @@
     (clrhash tagless-compiler::*source-texts*)
     (setf (gethash "test.blub" tagless-compiler::*source-texts*) *test-source*)
     (let* ((loc (make-loc "test.blub" 3 5 3 43))
-           (out (format-source-context loc :context 2)))
+           (out (format-source-context-for-test loc :context 2)))
       (check-true (has-substring out "(:module"))
       (check-true (has-substring out ":global")))))
 
 (defsuite "source-context printer: edge cases"
   (deftest "nil loc returns nil"
-    (check-false (format-source-context nil)))
+    (check-false (format-source-context-for-test nil)))
 
   (deftest "unknown file returns nil"
     (clrhash tagless-compiler::*source-texts*)
     (let ((loc (make-loc "nonexistent.blub" 1 1 1 5)))
-      (check-false (format-source-context loc))))
+      (check-false (format-source-context-for-test loc))))
 
   (deftest "source-context from form"
     (clrhash tagless-compiler::*source-texts*)

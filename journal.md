@@ -214,3 +214,4 @@ TODO:
 
 - Successfully unified and fixed the test framework: all tests correctly run via `make test` without dropping into the debugger.
 - cleaned up unnecessary mocking in tests
+- fixed all compiler warnings

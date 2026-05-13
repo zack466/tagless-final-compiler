@@ -220,6 +220,12 @@
     (:void nil)
     (t (error "blub-type->qbe-base: unrecognized type ~S" type))))
 
+;; --- Struct environment and layout utilities ---
+
+(defvar *blub-struct-env* (fset:empty-map)
+  "Maps struct name symbols -> plist (:size N :align N :fields ((name type offset)...)).
+   Populated by the :module handler in passes 2, 3, and 5 via pre-scan.")
+
 (defun blub-type->alloc-op (type)
   "Return the QBE stack-allocation opcode appropriate for a blub type."
   (case (blub-type-inner type)
@@ -318,10 +324,6 @@
     (t nil)))
 
 ;; --- Struct environment and layout utilities ---
-
-(defvar *blub-struct-env* (fset:empty-map)
-  "Maps struct name symbols -> plist (:size N :align N :fields ((name type offset)...)).
-   Populated by the :module handler in passes 2, 3, and 5 via pre-scan.")
 
 (defun round-up-to (n alignment)
   "Round N up to the nearest multiple of ALIGNMENT."
@@ -1720,7 +1722,6 @@
 (def-op *blub-5* (:defstruct name size align &rest fields)
   ;; Struct definitions are fully lowered in :module; nothing to emit per-struct
   ;; (the QBE :type def is emitted by the :module handler).
-  (declare (ignore name size align fields))
   nil)
 
 (def-op *blub-5* (:function ret-type name args body)
@@ -1859,22 +1860,26 @@
                  (let ((*print-pretty* t) (*print-right-margin* 100))
                    (write form :stream s)))
                (format t ";; [trace] wrote ~a~%" path)))))
-    (let* ((a0 (lower *blub-0* ast))   (_  (dump "pass0" a0))
-           (a1 (lower *blub-1* a0))    (_ (dump "pass1" a1))
-           (a2 (lower *blub-2* a1))    (_ (dump "pass2-struct" a2))
-           (a3 (lower *blub-3* a2))    (_ (dump "pass3-tc" a3))
-           (a4 (lower *blub-4* a3))    (_ (dump "pass4-norm" a4))
-           (a5 (lower *blub-5* a4)))
-      (declare (ignore _))
-      (dump "pass5-qbe" a5)
-      (build-qbe-ast a5
-                     :out-name (format nil "~a/~a" build-dir name)
-                     :runtime-c runtime-c
-                     :keep-temp-files keep-temp-files
-                     ;; The grammar-based validator expects bare (identifier)
-                     ;; for function names, but pass 5 uses (:global name).
-                     ;; The *qbe* printer has its own checks; skip grammar pass.
-                     :validate nil))))
+    (let* ((a0 (lower *blub-0* ast)))
+      (dump "pass0" a0)
+      (let* ((a1 (lower *blub-1* a0)))
+        (dump "pass1" a1)
+        (let* ((a2 (lower *blub-2* a1)))
+          (dump "pass2-struct" a2)
+          (let* ((a3 (lower *blub-3* a2)))
+            (dump "pass3-tc" a3)
+            (let* ((a4 (lower *blub-4* a3)))
+              (dump "pass4-norm" a4)
+              (let* ((a5 (lower *blub-5* a4)))
+                (dump "pass5-qbe" a5)
+                (build-qbe-ast a5
+                               :out-name (format nil "~a/~a" build-dir name)
+                               :runtime-c runtime-c
+                               :keep-temp-files keep-temp-files
+                               ;; The grammar-based validator expects bare (identifier)
+                               ;; for function names, but pass 5 uses (:global name).
+                               ;; The *qbe* printer has its own checks; skip grammar pass.
+                               :validate nil)))))))))
 
 (defun build-blub-file (path &key
                                   (name nil)

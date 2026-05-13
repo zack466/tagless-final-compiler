@@ -173,6 +173,7 @@
               (if (listp sub)
                   (multiple-value-bind (success matched remaining-sub)
                       (match-sequence-prefix sub (cdr rule) rules)
+                    (declare (ignore matched))
                     (if (and success (null remaining-sub))
                         (values t sub (cdr ast))
                         (signal-match-error ast rule)))
