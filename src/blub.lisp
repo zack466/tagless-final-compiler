@@ -139,39 +139,6 @@
   (match-grammar ast :module *blub-grammar*)
   ast)
 
-;; How to store intermediate data to carry between passes? Like symbol table,
-;; and the types of each variable. I guess the goal is to maybe try and keep
-;; as much of the information local as possible.
-;;
-;; What if want to treat code differently depending on the outermost tag?
-
-;; Language features
-;;
-;; declare variables with a type, variable assignment
-;;  - int, float, double, boolean, pointer, arrays, byte (char)
-;;  - everything stack allocated by default with alloc, read with load, set with store, since you need to be able to take their address
-;;    - temporaries don't need an alloc, since you can't get a pointer to them
-;; if, for, while, switch
-;; functions
-;; can declare global variables
-;; standard arithmetic operators, comparisons, logic, bitwise
-;; "block" (in curly braces)
-;; function pointers
-;; struct
-;;  - note that in QBE, passing a struct using the aggregate type class is passing by value, while passing with type :l means passing the pointer itself (even though technically it is always a pointer)
-;;  - so QBE deals with the C ABI for you when passing structs around
-;; varargs
-;; some way of accessing argv/argc
-;; standard library functions for printing, etc
-;;
-;; Compiler passes (in no particular order)
-;; - typecheck standard operators, function calls, pointers, etc
-;; - resolve all struct definitions, determine total size, plus size and offset of each field
-;; - cps transformation from nested statements into SSA
-;;
-;; Note: The exact grammar of the Blub AST is specified above in *BLUB-GRAMMAR*.
-;; Use VALIDATE-BLUB to ensure an AST conforms to this grammar before processing.
-
 ;; =============================================================================
 ;; Type utilities (used by multiple passes)
 ;; =============================================================================
@@ -322,6 +289,53 @@
     ((and (numberp expr) (floatp expr)) '(:type :f64))
     ((numberp expr) '(:type :i32))
     (t nil)))
+
+;; =============================================================================
+;; Module metadata (:meta section)
+;; =============================================================================
+;; Passes store and exchange metadata via a (:meta ...) node appended as the
+;; last child of :module. This keeps inter-pass state explicit in the AST and
+;; avoids reliance on persistent global variables between passes.
+;;
+;; Format: (:meta (:key1 value1) (:key2 value2) ...)
+;;   :struct-env  -- alist (name . layout-plist) from pass 2
+;;   :global-env  -- alist (name . type) from pass 3
+;;   :fn-sigs     -- alist (name . (ret-type . arg-types)) from pass 3
+;;
+;; Because :meta is the LAST child, (second module) still returns the first
+;; real item, preserving backward compatibility with navigation in tests.
+
+(defun meta-empty () '(:meta))
+
+(defun meta-get (meta key)
+  "Return the value for KEY in META, or NIL if absent."
+  (let ((item (find key (cdr meta) :key #'car)))
+    (when item (cadr item))))
+
+(defun meta-set (meta key value)
+  "Return a new :meta node with KEY set to VALUE."
+  (cons :meta (cons (list key value)
+                    (remove key (cdr meta) :key #'car))))
+
+(defun extract-meta (body)
+  "Split module BODY into (values meta items).
+   If the last item is (:meta ...), removes it; otherwise returns meta-empty and BODY unchanged."
+  (if (and (consp body)
+           (consp (car (last body)))
+           (eq (caar (last body)) :meta))
+    (values (car (last body)) (butlast body))
+    (values (meta-empty) body)))
+
+(defun fset-map->alist (m)
+  "Convert an FSet map to a list of (key . value) pairs."
+  (let ((result '()))
+    (fset:do-map (k v m) (push (cons k v) result))
+    result))
+
+(defun alist->fset-map (alist)
+  "Convert a list of (key . value) pairs to an FSet map."
+  (reduce (lambda (m pair) (fset:with m (car pair) (cdr pair)))
+          alist :initial-value (fset:empty-map)))
 
 ;; --- Struct environment and layout utilities ---
 
@@ -597,10 +611,15 @@
            (getf layout :fields))))
 
 (def-op *blub-2* (:module &rest body)
-  ;; Process struct definitions first (in order, so forward refs are detected),
-  ;; then pass the rest through.
-  (let ((*blub-struct-env* (fset:empty-map)))
-    (cons :module (mapcar #'recurse body))))
+  ;; Process each item; :defstruct handlers update *blub-struct-env* in order.
+  ;; Store the final struct-env in :meta so passes 3 and 5 can read it directly.
+  (multiple-value-bind (meta items) (extract-meta body)
+    (declare (ignore meta))
+    (let ((*blub-struct-env* (fset:empty-map)))
+      (let ((processed (mapcar #'recurse items)))
+        (append (list* :module processed)
+                (list (meta-set (meta-empty) :struct-env
+                                (fset-map->alist *blub-struct-env*))))))))
 
 ;; =============================================================================
 ;; Pass 3: Typechecking
@@ -956,31 +975,44 @@
 (def-op *blub-3* (:module &rest body)
   ;; Phase 1: build struct, global, and function-signature tables so all bodies
   ;; can reference them regardless of textual order.
-  (let ((*blub-struct-env*    (fset:empty-map))
-        (*tc-global-type-env* (fset:empty-map))
-        (*tc-fn-sigs*         (fset:empty-map)))
-    ;; Pre-scan structs (already resolved by pass 2).
-    (dolist (decl body)
-      (when (and (consp decl) (eq (car decl) :defstruct))
-        (destructuring-bind (kw sname ssize salign &rest sfields) decl
-          (declare (ignore kw))
-          (setf *blub-struct-env*
-                (fset:with *blub-struct-env* sname
-                           (list :size ssize :align salign :fields sfields))))))
-    (dolist (decl body)
-      (when (and (consp decl) (eq (car decl) :global))
-        (destructuring-bind (kw type gname &optional val) decl
-          (declare (ignore kw val))
-          (setf *tc-global-type-env* (fset:with *tc-global-type-env* gname type)))))
-    (dolist (decl body)
-      (when (and (consp decl) (eq (car decl) :function))
-        (destructuring-bind (kw fn-ret fn-name fn-args fn-body) decl
-          (declare (ignore kw fn-body))
-          (setf *tc-fn-sigs*
-                (fset:with *tc-fn-sigs* fn-name
-                           (cons fn-ret (mapcar #'car (cdr fn-args))))))))
-    ;; Phase 2: typecheck every declaration.
-    (cons :module (mapcar #'recurse body))))
+  (multiple-value-bind (meta items) (extract-meta body)
+    (let ((*blub-struct-env*    (if (meta-get meta :struct-env)
+                                  (alist->fset-map (meta-get meta :struct-env))
+                                  (fset:empty-map)))
+          (*tc-global-type-env* (fset:empty-map))
+          (*tc-fn-sigs*         (fset:empty-map)))
+      ;; Pre-scan structs only when not already in :meta (pass 2 was skipped).
+      (unless (meta-get meta :struct-env)
+        (dolist (decl items)
+          (when (and (consp decl) (eq (car decl) :defstruct))
+            (destructuring-bind (kw sname ssize salign &rest sfields) decl
+              (declare (ignore kw))
+              (setf *blub-struct-env*
+                    (fset:with *blub-struct-env* sname
+                               (list :size ssize :align salign :fields sfields)))))))
+      ;; Pre-scan globals (always needed: forward references to global vars).
+      (dolist (decl items)
+        (when (and (consp decl) (eq (car decl) :global))
+          (destructuring-bind (kw type gname &optional val) decl
+            (declare (ignore kw val))
+            (setf *tc-global-type-env* (fset:with *tc-global-type-env* gname type)))))
+      ;; Pre-scan function signatures (always needed: mutual recursion).
+      (dolist (decl items)
+        (when (and (consp decl) (eq (car decl) :function))
+          (destructuring-bind (kw fn-ret fn-name fn-args fn-body) decl
+            (declare (ignore kw fn-body))
+            (setf *tc-fn-sigs*
+                  (fset:with *tc-fn-sigs* fn-name
+                             (cons fn-ret (mapcar #'car (cdr fn-args))))))))
+      ;; Phase 2: typecheck every declaration, then store all envs in :meta.
+      (let* ((processed (mapcar #'recurse items))
+             (new-meta  (meta-set
+                         (meta-set
+                          (meta-set meta
+                                    :struct-env (fset-map->alist *blub-struct-env*))
+                          :global-env (fset-map->alist *tc-global-type-env*))
+                         :fn-sigs (fset-map->alist *tc-fn-sigs*))))
+        (append (list* :module processed) (list new-meta))))))
 
 ;; =============================================================================
 ;; Pass 4: Normalize expression nesting (three-address-code conversion)
@@ -1164,7 +1196,9 @@
   (list* :defstruct name size align fields))
 
 (def-op *blub-4* (:module &rest body)
-  (cons :module (mapcar #'recurse body)))
+  ;; Pass :meta through unchanged; recurse all real items.
+  (multiple-value-bind (meta items) (extract-meta body)
+    (append (list* :module (mapcar #'recurse items)) (list meta))))
 
 ;; =============================================================================
 ;; Pass 5: Lower to QBE IL
@@ -1698,7 +1732,8 @@
 ;; --- Pass 5: top-level form handlers ---
 
 (def-op *blub-5* (:global type name &optional value)
-  ;; Lower a global variable to a QBE :data item and register the address.
+  ;; Emit a QBE :data item. The global env is pre-loaded by :module from :meta,
+  ;; so no env-update side effects are needed here.
   (let* ((data-type (case (blub-type-inner type)
                       ((:u8 :i8)   :b)
                       ((:u32 :i32) :w)
@@ -1710,14 +1745,10 @@
          (init-val  (cond
                       ((null value)    0)
                       ((numberp value) value)
-                      (t (error "blub pass 5: global ~A initializer must be a literal" name)))))
-    ;; Register so that :var and :assign inside functions can find this global.
-    (let ((qname (b5-global-name name)))
-      (setf *b5-global-env*      (fset:with *b5-global-env*      name (list :global qname)))
-      (setf *b5-global-type-env* (fset:with *b5-global-type-env* name type))
-      ;; Emit QBE data: data $name = { type init }
-      (list :data (list :global qname) nil nil
-            (list :data-item data-type init-val)))))
+                      (t (error "blub pass 5: global ~A initializer must be a literal" name))))
+         (qname (b5-global-name name)))
+    (list :data (list :global qname) nil nil
+          (list :data-item data-type init-val))))
 
 (def-op *blub-5* (:defstruct name size align &rest fields)
   ;; Struct definitions are fully lowered in :module; nothing to emit per-struct
@@ -1782,31 +1813,55 @@
              (cons qbe-params (nreverse *b5-blocks*))))))
 
 (def-op *blub-5* (:module &rest body)
-  ;; Order: QBE type defs first, then data globals, then functions.
-  ;; *blub-struct-env* is populated from :defstruct nodes so that alloc-op/size
-  ;; helpers work when processing function bodies.
-  (let ((*b5-global-env*      (fset:empty-map))
-        (*b5-global-type-env* (fset:empty-map))
-        (*blub-struct-env*    (fset:empty-map)))
-    ;; Phase 1: pre-scan structs into *blub-struct-env* and build QBE type defs.
-    (let* ((struct-forms  (filter body (node-is-p :defstruct)))
-           (global-forms  (filter body (node-is-p :global)))
-           (other-forms   (filter body (lambda (n)
-                                         (and (consp n)
-                                              (not (eq (car n) :defstruct))
-                                              (not (eq (car n) :global))))))
-           (qbe-types
-             (mapcar (lambda (s)
-                       (destructuring-bind (kw sname ssize salign &rest sfields) s
-                         (declare (ignore kw))
-                         (let ((layout (list :size ssize :align salign :fields sfields)))
+  ;; Read struct-env and global-env from :meta; initialize dynamic envs.
+  ;; Output: QBE module with type defs, data items, functions (no :meta).
+  (multiple-value-bind (meta items) (extract-meta body)
+    (let ((*b5-global-env*      (fset:empty-map))
+          (*b5-global-type-env* (fset:empty-map))
+          (*blub-struct-env*    (fset:empty-map)))
+      (let* ((struct-forms (filter items (node-is-p :defstruct)))
+             (global-forms (filter items (node-is-p :global)))
+             (other-forms  (filter items (lambda (n)
+                                           (and (consp n)
+                                                (not (eq (car n) :defstruct))
+                                                (not (eq (car n) :global))))))
+             ;; Build QBE type defs and populate *blub-struct-env*.
+             (qbe-types
+               (if (meta-get meta :struct-env)
+                 ;; Use struct-env from :meta: no body re-scan needed.
+                 (mapcar (lambda (pair)
                            (setf *blub-struct-env*
-                                 (fset:with *blub-struct-env* sname layout))
-                           (blub-struct->qbe-type sname layout))))
-                     struct-forms))
-           (qbe-globals   (mapcar #'recurse global-forms))
-           (qbe-rest      (mapcar #'recurse other-forms)))
-      (list* :module (append qbe-types qbe-globals qbe-rest)))))
+                                 (fset:with *blub-struct-env* (car pair) (cdr pair)))
+                           (blub-struct->qbe-type (car pair) (cdr pair)))
+                         (meta-get meta :struct-env))
+                 ;; Fallback: build from annotated :defstruct forms in body.
+                 (mapcar (lambda (s)
+                           (destructuring-bind (kw sname ssize salign &rest sfields) s
+                             (declare (ignore kw))
+                             (let ((layout (list :size ssize :align salign :fields sfields)))
+                               (setf *blub-struct-env*
+                                     (fset:with *blub-struct-env* sname layout))
+                               (blub-struct->qbe-type sname layout))))
+                         struct-forms))))
+        ;; Populate global env from :meta, or pre-scan global forms as fallback.
+        (if (meta-get meta :global-env)
+          (dolist (pair (meta-get meta :global-env))
+            (setf *b5-global-env*
+                  (fset:with *b5-global-env* (car pair)
+                             (list :global (b5-global-name (car pair)))))
+            (setf *b5-global-type-env*
+                  (fset:with *b5-global-type-env* (car pair) (cdr pair))))
+          ;; Fallback: scan global forms to build env before recursing.
+          (dolist (item global-forms)
+            (destructuring-bind (kw type gname &optional val) item
+              (declare (ignore kw val))
+              (setf *b5-global-env*
+                    (fset:with *b5-global-env* gname (list :global (b5-global-name gname))))
+              (setf *b5-global-type-env*
+                    (fset:with *b5-global-type-env* gname type)))))
+        (let ((qbe-globals (mapcar #'recurse global-forms))
+              (qbe-rest    (mapcar #'recurse other-forms)))
+          (list* :module (append qbe-types qbe-globals qbe-rest)))))))
 
 ;; =============================================================================
 ;; Public API
