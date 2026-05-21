@@ -18,7 +18,7 @@ test:
 examples:
 	rlwrap sbcl --load dev.lisp \
 		--eval '(in-package #:tagless-compiler)' \
-		--eval '(run-blub-examples)' \
+		--eval '(run-blub-examples :trace t)' \
 		--eval '(sb-ext:exit)'
 
 clean:

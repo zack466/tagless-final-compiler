@@ -475,7 +475,7 @@
 (defparameter *blub-1* (make-interpreter :on-unknown :recurse
                                          :readable-name "BLUB-1 (rename)"))
 
-(define-pass-context *rename-env* :doc "Tracks variable renames for the blub-1 pass.")
+(defvar *rename-env* (fset:empty-map) "Tracks variable renames for the blub-1 pass.")
 
 (defun node-is-p (keyword)
   (lambda (node) (and (consp node) (eq (car node) keyword))))
@@ -488,23 +488,23 @@
 
 (defun register-global (name)
   "Add NAME -> NAME to *rename-env*. Errors if NAME is already there."
-  (when (nth-value 1 (env-lookup *rename-env* name))
+  (when (nth-value 1 (fset:lookup *rename-env* name))
     (error "Global variable ~A already declared." name))
-  (env-bind *rename-env* name name)
+  (setf *rename-env* (fset:with *rename-env* name name))
   name)
 
 (defun register-local (name)
   "Add NAME -> chosen-name to *rename-env*, freshening if NAME is
    already bound (shadowing). Returns the chosen name."
-  (let* ((found     (nth-value 1 (env-lookup *rename-env* name)))
+  (let* ((found     (nth-value 1 (fset:lookup *rename-env* name)))
          (new-name  (if found (fresh-name (string name)) name)))
-    (env-bind *rename-env* name new-name)
+    (setf *rename-env* (fset:with *rename-env* name new-name))
     new-name))
 
 (defun lookup-or-error (name kind)
   "Look up NAME in *rename-env*. KIND is a string used in the error
    message (e.g. \"assigned\" or \"read\"). Returns the renamed symbol."
-  (multiple-value-bind (mapped found) (env-lookup *rename-env* name)
+  (multiple-value-bind (mapped found) (fset:lookup *rename-env* name)
     (unless found (error "Variable ~A but not yet declared: ~A." kind name))
     mapped))
 
@@ -539,11 +539,11 @@
 
 (def-op *blub-1* (:block &rest body)
   ;; Fresh dynamic binding initialized from outer scope, so changes don't leak out.
-  (with-scope (*rename-env*)
+  (let ((*rename-env* *rename-env*))
     (cons :block (mapcar #'recurse body))))
 
 (def-op *blub-1* (:function type name args block)
-  (with-scope (*rename-env*)
+  (let ((*rename-env* *rename-env*))
     ;; Each ARG is a (type name) pair; we register the name (which may shadow
     ;; an outer global with the same name) and rebuild the pair using the
     ;; chosen new name.
@@ -566,21 +566,10 @@
   ;; Fresh empty map at module scope. Globals are processed first so
   ;; their bindings are visible to all functions/blocks regardless of
   ;; textual order, then the rest of the module is renamed.
-  (with-empty-scope (*rename-env*)
+  (let ((*rename-env* (fset:empty-map)))
     (let ((globals (mapcar #'recurse (filter body (node-is-p :global))))
           (renamed (mapcar #'recurse (filter body (node-is-not-p :global)))))
       (cons :module (append globals renamed)))))
-
-; (defparameter *blub-program* (car (read-example "blub/1-shadowing.lisp")))
-
-; (validate-blub *blub-program*)
-;
-; (multiple-value-bind (body trace) (with-trace (lower *blub-1* *blub-program*))
-;   (declare (ignore body))
-;   (print-trace trace))
-;
-; (format t "~S~%" (lisp-to-string (lower *blub-1* *blub-program*)))
-
 
 ;; =============================================================================
 ;; Pass 2: Struct layout resolution
@@ -1912,8 +1901,7 @@
            (when trace
              (let ((path (format nil "~a/~a.~a.lisp" build-dir name label)))
                (with-open-file (s path :direction :output :if-exists :supersede)
-                 (let ((*print-pretty* t) (*print-right-margin* 100))
-                   (write form :stream s)))
+                 (write-string (pp-blub form) s))
                (format t ";; [trace] wrote ~a~%" path)))))
     (let* ((a0 (lower *blub-0* ast)))
       (dump "pass0" a0)

@@ -214,3 +214,104 @@
 (defun lisp-to-string (expr)
   "Converts an sexp to a string before highlighting it"
   (highlight-lisp (format nil "~S" expr)))
+
+;; ---------------------------------------------------------------------------
+;; Pretty printer for Blub/QBE AST s-expressions
+;; ---------------------------------------------------------------------------
+;; A width-aware pretty printer that knows the indentation conventions of the
+;; Blub language:
+;;   - Block-like forms (:module, :block) always break; each child on its own
+;;     indented line.
+;;   - Statement forms (:function, :while, :if, …) keep a few "header" args
+;;     inline with the head, then break the body onto indented lines.
+;;   - Expression forms (:add, :var, :call, …) are printed flat when they fit
+;;     within the target width; if they don't fit they fall back to break-all.
+;;
+;; Entry point: PP-BLUB  (returns a plain string, no ANSI escapes).
+;; For colored output, pipe through HIGHLIGHT-LISP.
+
+(defparameter *pp-default-width* 100
+  "Default target line width used by PP-BLUB.")
+
+(defun %pp-flat (form)
+  "Return FORM as a compact single-line string."
+  (with-output-to-string (s)
+    (write form :stream s :pretty nil)))
+
+(defun %pp-n-inline (head)
+  "Number of args to keep on the same line as HEAD when breaking a form.
+   0 = break every arg; N>0 = keep first N args inline, break the rest."
+  (case head
+    ((:module)               0)
+    ((:block)                0)
+    ((:function :def)        2)   ; keep ret-type + name inline
+    ((:while)                1)   ; keep condition inline
+    ((:if)                   1)   ; keep condition inline
+    ((:defstruct)            1)   ; keep struct name inline
+    ((:lambda :let)          1)   ; keep params inline
+    ((:data)                 3)   ; keep name linkage align inline (QBE)
+    (t                       0)))
+
+(defun %pp-always-break-p (head)
+  "T when forms with HEAD should always be broken, even if they fit on one line."
+  (case head
+    ((:module :block :function :def :while :if) t)
+    (t nil)))
+
+(defun %pp-write (stream form col width)
+  "Write FORM to STREAM, treating COL as the current column.
+   Returns the column after the last character written."
+  (cond
+    ;; Atoms are always flat.
+    ((atom form)
+     (let ((s (%pp-flat form)))
+       (write-string s stream)
+       (+ col (length s))))
+
+    ;; Check for inline fit (skipped for always-break heads).
+    ((and (not (%pp-always-break-p (car form)))
+          (<= (+ col (length (%pp-flat form))) width))
+     (let ((s (%pp-flat form)))
+       (write-string s stream)
+       (+ col (length s))))
+
+    ;; Broken mode.
+    (t
+     (let* ((open-col     col)
+            (child-indent (+ open-col 2))
+            (head         (car form))
+            (args         (cdr form))
+            (head-str     (%pp-flat head))
+            (n            (min (%pp-n-inline head) (length args)))
+            (inline-args  (subseq args 0 n))
+            (broken-args  (nthcdr n args)))
+       (write-char #\( stream)
+       (write-string head-str stream)
+       (setf col (+ open-col 1 (length head-str)))
+       ;; Inline args: always flat, stay on the head's line.
+       (dolist (arg inline-args)
+         (write-char #\Space stream)
+         (incf col)
+         (let ((flat (%pp-flat arg)))
+           (write-string flat stream)
+           (incf col (length flat))))
+       ;; Broken args: each on its own indented line.
+       (dolist (arg broken-args)
+         (terpri stream)
+         (write-string (make-string child-indent :initial-element #\Space) stream)
+         (setf col (%pp-write stream arg child-indent width)))
+       (write-char #\) stream)
+       (1+ col)))))
+
+(defun pp-blub (form &key (width *pp-default-width*))
+  "Pretty-print the Blub/QBE AST FORM and return the result as a string.
+
+   Block-like heads (:module, :block, :function, :while, :if, …) always
+   break their children onto separate indented lines. All other forms are
+   printed flat when they fit within WIDTH characters; if they don't fit
+   they are broken with 2-space indentation per nesting level.
+
+   Returns plain text with no ANSI escapes; call HIGHLIGHT-LISP on the
+   result if colored terminal output is wanted."
+  (with-output-to-string (s)
+    (%pp-write s form 0 width)))

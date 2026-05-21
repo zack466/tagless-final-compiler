@@ -219,3 +219,15 @@ TODO:
 # 5/13/26
 - add "staging", so can annotate code with the source language (like :blub or :qbe), which can then be freely mixed (top-level ignores passes if not within the specified language)
 - moving metadata into AST instead of special variables
+
+# 5/14/26
+- TODO: output intermediate temp files
+- interesting: benchmark clang and qbe output
+- upcoming: scheme or ML style language
+  - difficulty: memory management
+  - compile scheme to blub?
+
+# 5/20/26
+- idea: define meta language that is expanded by def-op rules that I define, used to manipulate the AST
+- then have staging, so something like :qbe really expands into the :qbe-1, :qbe-2, etc passes
+  - so basically i guess all the def-op rules I need is like the "core interpreter", so then I can start writing compiler passes in the language itself using macros instead of using def-op
