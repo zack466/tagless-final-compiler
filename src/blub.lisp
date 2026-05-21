@@ -140,161 +140,6 @@
   ast)
 
 ;; =============================================================================
-;; Type utilities (used by multiple passes)
-;; =============================================================================
-
-(defun blub-type-inner (type)
-  "Extract the kind keyword from a blub type node.
-   (:type :i32)           -> :i32
-   (:type (:pointer X))  -> :pointer
-   (:type (:struct name)) -> :struct
-   (:type (:fn ret ...))  -> :fn
-   (:pointer X)          -> :pointer  (handles raw pointer nodes too)"
-  (cond
-    ((and (consp type) (eq (car type) :type))
-     (let ((inner (cadr type)))
-       (cond
-         ((keywordp inner) inner)
-         ((and (consp inner) (eq (car inner) :pointer)) :pointer)
-         ((and (consp inner) (eq (car inner) :struct))  :struct)
-         ((and (consp inner) (eq (car inner) :fn))      :fn)
-         (t (error "blub-type-inner: unknown :type content ~S" inner)))))
-    ((and (consp type) (eq (car type) :pointer)) :pointer)
-    ((and (consp type) (eq (car type) :struct))  :struct)
-    ((and (consp type) (eq (car type) :fn))      :fn)
-    (t (error "blub-type-inner: not a type node ~S" type))))
-
-(defun blub-struct-name (type)
-  "Extract the struct name symbol from (:type (:struct name)) or (:struct name)."
-  (cond
-    ((and (consp type) (eq (car type) :type)
-          (consp (cadr type)) (eq (car (cadr type)) :struct))
-     (cadr (cadr type)))
-    ((and (consp type) (eq (car type) :struct))
-     (cadr type))
-    (t (error "blub-struct-name: not a struct type ~S" type))))
-
-(defun blub-type->qbe-base (type)
-  "Map a blub (:type ...) node to the QBE base type keyword.
-   Returns NIL for :void (QBE omits the return type on void functions).
-   Function pointer types (:fn ...) map to :l (pointer-sized)."
-  (case (blub-type-inner type)
-    ((:u8 :i8 :u32 :i32) :w)
-    ((:u64 :i64) :l)
-    (:f32 :s)
-    (:f64 :d)
-    ((:pointer :fn) :l)
-    (:void nil)
-    (t (error "blub-type->qbe-base: unrecognized type ~S" type))))
-
-;; --- Struct environment and layout utilities ---
-
-(defvar *blub-struct-env* (fset:empty-map)
-  "Maps struct name symbols -> plist (:size N :align N :fields ((name type offset)...)).
-   Populated by pass 2's :module handler. Passes 3 and 5 use their own
-   pass-local bindings (*tc-struct-env* and *b5-struct-env*) initialized
-   from :meta, and never touch this variable.")
-
-(defun blub-type->alloc-op (type struct-env)
-  "Return the QBE stack-allocation opcode appropriate for a blub type.
-   STRUCT-ENV is the caller's pass-local struct layout map."
-  (case (blub-type-inner type)
-    ((:u8 :i8 :u32 :i32 :f32) :alloc4)
-    ((:u64 :i64 :f64 :pointer :fn)                :alloc8)
-    (:struct
-     (let* ((layout (nth-value 0 (fset:lookup struct-env (blub-struct-name type))))
-            (align  (getf layout :align)))
-       (cond ((<= align 4) :alloc4)
-             ((<= align 8) :alloc8)
-             (t :alloc16))))
-    (t (error "blub-type->alloc-op: cannot alloc type ~S" type))))
-
-(defun blub-type->alloc-size (type struct-env)
-  "Return the byte count to allocate for a blub type.
-   STRUCT-ENV is the caller's pass-local struct layout map."
-  (case (blub-type-inner type)
-    ((:u8 :i8 :u32 :i32 :f32) 4)
-    ((:u64 :i64 :f64 :pointer :fn)                8)
-    (:struct
-     (getf (nth-value 0 (fset:lookup struct-env (blub-struct-name type))) :size))
-    (t (error "blub-type->alloc-size: cannot size type ~S" type))))
-
-(defun blub-type->load-op (type)
-  "Return the QBE load opcode for a blub type."
-  (case (blub-type-inner type)
-    (:u8  :loadub)
-    (:i8  :loadsb)
-    (:u32 :loaduw)
-    (:i32 :loadsw)
-    ((:u64 :i64)     :loadl)
-    (:f32            :loads)
-    (:f64            :loadd)
-    ((:pointer :fn)  :loadl)
-    (t (error "blub-type->load-op: cannot load type ~S" type))))
-
-(defun blub-type->store-op (type)
-  "Return the QBE store opcode for a blub type."
-  (case (blub-type-inner type)
-    ((:u8 :i8)   :storeb)
-    ((:u32 :i32) :storew)
-    ((:u64 :i64)     :storel)
-    (:f32            :stores)
-    (:f64            :stored)
-    ((:pointer :fn)  :storel)
-    (t (error "blub-type->store-op: cannot store type ~S" type))))
-
-(defun blub-arith->qbe-op (blub-op)
-  "Map a blub arithmetic/bitwise operator keyword to a QBE opcode."
-  (case blub-op
-    (:add :add) (:sub :sub) (:mul :mul) (:div :div)
-    (:and :and) (:or  :or)  (:xor :xor)
-    (t (error "blub-arith->qbe-op: unknown op ~S" blub-op))))
-
-(defun blub-cmp->qbe-op (blub-op type)
-  "Map a blub comparison operator and type to a QBE compare opcode."
-  (case (blub-type-inner type)
-    (:f64
-     (case blub-op
-       (:eq :ceqd) (:ne :cned) (:lt :cltd) (:le :cled) (:gt :cgtd) (:ge :cged)
-       (t (error "blub-cmp->qbe-op: unknown f64 cmp ~S" blub-op))))
-    (:f32
-     (case blub-op
-       (:eq :ceqs) (:ne :cnes) (:lt :clts) (:le :cles) (:gt :cgts) (:ge :cges)
-       (t (error "blub-cmp->qbe-op: unknown f32 cmp ~S" blub-op))))
-    (:u64
-     (case blub-op
-       (:eq :ceql) (:ne :cnel) (:lt :cultl) (:le :culel) (:gt :cugtl) (:ge :cugel)
-       (t (error "blub-cmp->qbe-op: unknown u64 cmp ~S" blub-op))))
-    (:i64
-     (case blub-op
-       (:eq :ceql) (:ne :cnel) (:lt :csltl) (:le :cslel) (:gt :csgtl) (:ge :csgel)
-       (t (error "blub-cmp->qbe-op: unknown i64 cmp ~S" blub-op))))
-    (:pointer
-     (case blub-op
-       (:eq :ceql) (:ne :cnel) (:lt :cultl) (:le :culel) (:gt :cugtl) (:ge :cugel)
-       (t (error "blub-cmp->qbe-op: unknown pointer cmp ~S" blub-op))))
-    ((:u8 :u32)
-     (case blub-op
-       (:eq :ceqw) (:ne :cnew) (:lt :cultw) (:le :culew) (:gt :cugtw) (:ge :cugew)
-       (t (error "blub-cmp->qbe-op: unknown unsigned cmp ~S" blub-op))))
-    ;; :i8, :i32 → signed word comparison
-    (t
-     (case blub-op
-       (:eq :ceqw) (:ne :cnew) (:lt :csltw) (:le :cslew) (:gt :csgtw) (:ge :csgew)
-       (t (error "blub-cmp->qbe-op: unknown int cmp ~S" blub-op))))))
-
-(defun blub-type-of (expr)
-  "Extract the Blub type annotation from a :typed expression, or infer from literal.
-   After pass 3, all sub-expressions are wrapped as (:typed TYPE INNER).
-   Used by passes 4 and 5 to read type info threaded through the AST."
-  (cond
-    ((and (consp expr) (eq (car expr) :typed)) (cadr expr))
-    ((and (numberp expr) (typep expr 'single-float)) '(:type :f32))
-    ((and (numberp expr) (floatp expr)) '(:type :f64))
-    ((numberp expr) '(:type :i32))
-    (t nil)))
-
-;; =============================================================================
 ;; Module metadata (:meta section)
 ;; =============================================================================
 ;; Passes store and exchange metadata via a (:meta ...) node appended as the
@@ -341,86 +186,6 @@
   (reduce (lambda (m pair) (fset:with m (car pair) (cdr pair)))
           alist :initial-value (fset:empty-map)))
 
-;; --- Struct environment and layout utilities ---
-
-(defun round-up-to (n alignment)
-  "Round N up to the nearest multiple of ALIGNMENT."
-  (if (zerop alignment) n (* (ceiling n alignment) alignment)))
-
-(defun blub-field-size-align (field-type struct-env)
-  "Return (values byte-size alignment) for a blub type, using C-compatible rules.
-   STRUCT-ENV is the caller's pass-local struct layout map."
-  (case (blub-type-inner field-type)
-    ((:u8 :i8)         (values 1 1))
-    ((:u32 :i32 :f32)  (values 4 4))
-    ((:u64 :i64 :f64 :pointer) (values 8 8))
-    (:struct
-     (let* ((sname (blub-struct-name field-type))
-            (layout (nth-value 0 (fset:lookup struct-env sname))))
-       (unless layout
-         (error "blub-field-size-align: unknown struct ~S" sname))
-       (values (getf layout :size) (getf layout :align))))
-    (t (error "blub-field-size-align: unknown type ~S" field-type))))
-
-(defun blub-compute-struct-layout (fields struct-env)
-  "Given FIELDS as a list of (type name) pairs, compute C-compatible struct layout.
-   STRUCT-ENV is the pass-local map used to resolve nested struct field sizes.
-   Returns a plist (:size N :align N :fields ((name type offset)...))."
-  (let ((offset 0) (max-align 1) (resolved '()))
-    (dolist (field fields)
-      (destructuring-bind (ftype fname) field
-        (multiple-value-bind (fsize falign) (blub-field-size-align ftype struct-env)
-          (setf max-align (max max-align falign))
-          (let ((ao (round-up-to offset falign)))
-            (push (list fname ftype ao) resolved)
-            (setf offset (+ ao fsize))))))
-    (list :size (round-up-to offset max-align)
-          :align max-align
-          :fields (nreverse resolved))))
-
-(defun blub-field-ext-type (field-type)
-  "Map a blub field type to a QBE ext-type (for use in :type aggregate definitions)."
-  (case (blub-type-inner field-type)
-    ((:u8 :i8)         :b)
-    ((:u32 :i32)       :w)
-    (:f32              :s)
-    ((:u64 :i64 :pointer) :l)
-    (:f64                   :d)
-    (:struct
-     (list :user-type
-           (substitute #\_ #\- (string-downcase (string (blub-struct-name field-type))))))
-    (t (error "blub-field-ext-type: unsupported type ~S" field-type))))
-
-(defun blub-struct->qbe-type (name layout struct-env)
-  "Build a QBE (:type ...) aggregate type declaration for a struct.
-   STRUCT-ENV is the pass-local map used to compute nested struct field sizes.
-   Includes explicit padding bytes so QBE's layout matches our computed offsets."
-  (let* ((fields (getf layout :fields))
-         (qname  (list :user-type
-                       (substitute #\_ #\- (string-downcase (string name)))))
-         (qfields '())
-         (cur 0))
-    (dolist (field fields)
-      (destructuring-bind (fname ftype foffset) field
-        (declare (ignore fname))
-        (when (> foffset cur)
-          (push (list :field :b (- foffset cur)) qfields))
-        (push (list :field (blub-field-ext-type ftype)) qfields)
-        (multiple-value-bind (fsize _) (blub-field-size-align ftype struct-env)
-          (declare (ignore _))
-          (setf cur (+ foffset fsize)))))
-    (let ((total (getf layout :size)))
-      (when (> total cur)
-        (push (list :field :b (- total cur)) qfields)))
-    (list* :type qname nil (nreverse qfields))))
-
-(defun blub-type->qbe-abity (type)
-  "Map a blub type to a QBE ABITY (for function params and return types).
-   Like blub-type->qbe-base, but also handles struct types as (:user-type name)."
-  (if (eq (blub-type-inner type) :struct)
-    (list :user-type
-          (substitute #\_ #\- (string-downcase (string (blub-struct-name type)))))
-    (blub-type->qbe-base type)))
 
 ;; =============================================================================
 ;; Pass 0: Desugaring
@@ -460,6 +225,7 @@
 (def-op *blub-0* (:module &rest body)
   ;; Process each top-level item (functions, globals, standalone blocks, struct defs).
   (cons :module (mapcar #'recurse body)))
+
 
 ;; =============================================================================
 ;; Pass 1: Rename variables
@@ -578,6 +344,7 @@
           (renamed (mapcar #'recurse (filter body (node-is-not-p :global)))))
       (cons :module (append globals renamed)))))
 
+
 ;; =============================================================================
 ;; Pass 2: Struct layout resolution
 ;; =============================================================================
@@ -592,6 +359,46 @@
 
 (defparameter *blub-2* (make-interpreter :on-unknown :passthrough
                                          :readable-name "BLUB-2 (struct layout)"))
+
+(defvar *blub-struct-env* (fset:empty-map)
+  "Maps struct name symbols -> plist (:size N :align N :fields ((name type offset)...)).")
+
+(defun round-up-to (n alignment)
+  "Round N up to the nearest multiple of ALIGNMENT."
+  (if (zerop alignment) n (* (ceiling n alignment) alignment)))
+
+(defun blub-field-size-align (field-type struct-env)
+  "Return (values byte-size alignment) for a blub type, using C-compatible rules.
+   STRUCT-ENV is the caller's pass-local struct layout map."
+  (case (blub-type-inner field-type)
+    ((:u8 :i8)         (values 1 1))
+    ((:u32 :i32 :f32)  (values 4 4))
+    ((:u64 :i64 :f64 :pointer) (values 8 8))
+    (:struct
+     (let* ((sname (blub-struct-name field-type))
+            (layout (nth-value 0 (fset:lookup struct-env sname))))
+       (unless layout
+         (error "blub-field-size-align: unknown struct ~S" sname))
+       (values (getf layout :size) (getf layout :align))))
+    (t (error "blub-field-size-align: unknown type ~S" field-type))))
+
+
+(defun blub-compute-struct-layout (fields struct-env)
+  "Given FIELDS as a list of (type name) pairs, compute C-compatible struct layout.
+   STRUCT-ENV is the pass-local map used to resolve nested struct field sizes.
+   Returns a plist (:size N :align N :fields ((name type offset)...))."
+  (let ((offset 0) (max-align 1) (resolved '()))
+    (dolist (field fields)
+      (destructuring-bind (ftype fname) field
+        (multiple-value-bind (fsize falign) (blub-field-size-align ftype struct-env)
+          (setf max-align (max max-align falign))
+          (let ((ao (round-up-to offset falign)))
+            (push (list fname ftype ao) resolved)
+            (setf offset (+ ao fsize))))))
+    (list :size (round-up-to offset max-align)
+          :align max-align
+          :fields (nreverse resolved))))
+
 
 (def-op *blub-2* (:defstruct name &rest fields)
   ;; Resolve C-compatible layout for this struct definition.
@@ -615,6 +422,7 @@
         (append (list* :module processed)
                 (list (meta-set (meta-empty) :struct-env
                                 (fset-map->alist *blub-struct-env*))))))))
+
 
 ;; =============================================================================
 ;; Pass 3: Typechecking
@@ -653,7 +461,49 @@
    from the :struct-env entry in :meta. Never shared with other passes.")
 
 
-;; --- Type predicate helpers ---
+;; Type utilities
+
+(defun blub-type-inner (type)
+  "Extract the kind keyword from a blub type node.
+   (:type :i32)           -> :i32
+   (:type (:pointer X))  -> :pointer
+   (:type (:struct name)) -> :struct
+   (:type (:fn ret ...))  -> :fn
+   (:pointer X)          -> :pointer  (handles raw pointer nodes too)"
+  (cond
+    ((and (consp type) (eq (car type) :type))
+     (let ((inner (cadr type)))
+       (cond
+         ((keywordp inner) inner)
+         ((and (consp inner) (eq (car inner) :pointer)) :pointer)
+         ((and (consp inner) (eq (car inner) :struct))  :struct)
+         ((and (consp inner) (eq (car inner) :fn))      :fn)
+         (t (error "blub-type-inner: unknown :type content ~S" inner)))))
+    ((and (consp type) (eq (car type) :pointer)) :pointer)
+    ((and (consp type) (eq (car type) :struct))  :struct)
+    ((and (consp type) (eq (car type) :fn))      :fn)
+    (t (error "blub-type-inner: not a type node ~S" type))))
+
+(defun blub-struct-name (type)
+  "Extract the struct name symbol from (:type (:struct name)) or (:struct name)."
+  (cond
+    ((and (consp type) (eq (car type) :type)
+          (consp (cadr type)) (eq (car (cadr type)) :struct))
+     (cadr (cadr type)))
+    ((and (consp type) (eq (car type) :struct))
+     (cadr type))
+    (t (error "blub-struct-name: not a struct type ~S" type))))
+
+(defun blub-type-of (expr)
+  "Extract the Blub type annotation from a :typed expression, or infer from literal.
+   After pass 3, all sub-expressions are wrapped as (:typed TYPE INNER).
+   Used by passes 4 and 5 to read type info threaded through the AST."
+  (cond
+    ((and (consp expr) (eq (car expr) :typed)) (cadr expr))
+    ((and (numberp expr) (typep expr 'single-float)) '(:type :f32))
+    ((and (numberp expr) (floatp expr)) '(:type :f64))
+    ((numberp expr) '(:type :i32))
+    (t nil)))
 
 (defun tc-int-like-p (type)
   "True for integer-family types (all sizes, signed and unsigned)."
@@ -1013,6 +863,7 @@
                          :fn-sigs (fset-map->alist *tc-fn-sigs*))))
         (append (list* :module processed) (list new-meta))))))
 
+
 ;; =============================================================================
 ;; Pass 4: Normalize expression nesting (three-address-code conversion)
 ;; =============================================================================
@@ -1199,6 +1050,7 @@
   (multiple-value-bind (meta items) (extract-meta body)
     (append (list* :module (mapcar #'recurse items)) (list meta))))
 
+
 ;; =============================================================================
 ;; Pass 5: Lower to QBE IL
 ;; =============================================================================
@@ -1218,7 +1070,7 @@
 (defparameter *blub-5* (make-interpreter :on-unknown :error
                                          :readable-name "BLUB-5 (lower to QBE)"))
 
-;; --- Pass 5 mutable state (rebound per function by the :function handler) ---
+;; --- Pass 5 state (rebound per function by the :function handler) ---
 
 (defvar *b5-stmts* nil
   "Reversed list of QBE instructions for the current basic block.")
@@ -1256,6 +1108,154 @@
 
 (defvar *b5-return-type* nil
   "The blub (:type ...) node for the current function's return type.")
+
+;; Conversion to QBE utilities
+
+(defun blub-type->alloc-op (type struct-env)
+  "Return the QBE stack-allocation opcode appropriate for a blub type.
+   STRUCT-ENV is the caller's pass-local struct layout map."
+  (case (blub-type-inner type)
+    ((:u8 :i8 :u32 :i32 :f32) :alloc4)
+    ((:u64 :i64 :f64 :pointer :fn)                :alloc8)
+    (:struct
+     (let* ((layout (nth-value 0 (fset:lookup struct-env (blub-struct-name type))))
+            (align  (getf layout :align)))
+       (cond ((<= align 4) :alloc4)
+             ((<= align 8) :alloc8)
+             (t :alloc16))))
+    (t (error "blub-type->alloc-op: cannot alloc type ~S" type))))
+
+(defun blub-type->alloc-size (type struct-env)
+  "Return the byte count to allocate for a blub type.
+   STRUCT-ENV is the caller's pass-local struct layout map."
+  (case (blub-type-inner type)
+    ((:u8 :i8 :u32 :i32 :f32) 4)
+    ((:u64 :i64 :f64 :pointer :fn)                8)
+    (:struct
+     (getf (nth-value 0 (fset:lookup struct-env (blub-struct-name type))) :size))
+    (t (error "blub-type->alloc-size: cannot size type ~S" type))))
+
+(defun blub-type->load-op (type)
+  "Return the QBE load opcode for a blub type."
+  (case (blub-type-inner type)
+    (:u8  :loadub)
+    (:i8  :loadsb)
+    (:u32 :loaduw)
+    (:i32 :loadsw)
+    ((:u64 :i64)     :loadl)
+    (:f32            :loads)
+    (:f64            :loadd)
+    ((:pointer :fn)  :loadl)
+    (t (error "blub-type->load-op: cannot load type ~S" type))))
+
+(defun blub-type->store-op (type)
+  "Return the QBE store opcode for a blub type."
+  (case (blub-type-inner type)
+    ((:u8 :i8)   :storeb)
+    ((:u32 :i32) :storew)
+    ((:u64 :i64)     :storel)
+    (:f32            :stores)
+    (:f64            :stored)
+    ((:pointer :fn)  :storel)
+    (t (error "blub-type->store-op: cannot store type ~S" type))))
+
+(defun blub-arith->qbe-op (blub-op)
+  "Map a blub arithmetic/bitwise operator keyword to a QBE opcode."
+  (case blub-op
+    (:add :add) (:sub :sub) (:mul :mul) (:div :div)
+    (:and :and) (:or  :or)  (:xor :xor)
+    (t (error "blub-arith->qbe-op: unknown op ~S" blub-op))))
+
+(defun blub-cmp->qbe-op (blub-op type)
+  "Map a blub comparison operator and type to a QBE compare opcode."
+  (case (blub-type-inner type)
+    (:f64
+     (case blub-op
+       (:eq :ceqd) (:ne :cned) (:lt :cltd) (:le :cled) (:gt :cgtd) (:ge :cged)
+       (t (error "blub-cmp->qbe-op: unknown f64 cmp ~S" blub-op))))
+    (:f32
+     (case blub-op
+       (:eq :ceqs) (:ne :cnes) (:lt :clts) (:le :cles) (:gt :cgts) (:ge :cges)
+       (t (error "blub-cmp->qbe-op: unknown f32 cmp ~S" blub-op))))
+    (:u64
+     (case blub-op
+       (:eq :ceql) (:ne :cnel) (:lt :cultl) (:le :culel) (:gt :cugtl) (:ge :cugel)
+       (t (error "blub-cmp->qbe-op: unknown u64 cmp ~S" blub-op))))
+    (:i64
+     (case blub-op
+       (:eq :ceql) (:ne :cnel) (:lt :csltl) (:le :cslel) (:gt :csgtl) (:ge :csgel)
+       (t (error "blub-cmp->qbe-op: unknown i64 cmp ~S" blub-op))))
+    (:pointer
+     (case blub-op
+       (:eq :ceql) (:ne :cnel) (:lt :cultl) (:le :culel) (:gt :cugtl) (:ge :cugel)
+       (t (error "blub-cmp->qbe-op: unknown pointer cmp ~S" blub-op))))
+    ((:u8 :u32)
+     (case blub-op
+       (:eq :ceqw) (:ne :cnew) (:lt :cultw) (:le :culew) (:gt :cugtw) (:ge :cugew)
+       (t (error "blub-cmp->qbe-op: unknown unsigned cmp ~S" blub-op))))
+    ;; :i8, :i32 → signed word comparison
+    (t
+     (case blub-op
+       (:eq :ceqw) (:ne :cnew) (:lt :csltw) (:le :cslew) (:gt :csgtw) (:ge :csgew)
+       (t (error "blub-cmp->qbe-op: unknown int cmp ~S" blub-op))))))
+
+(defun blub-field-ext-type (field-type)
+  "Map a blub field type to a QBE ext-type (for use in :type aggregate definitions)."
+  (case (blub-type-inner field-type)
+    ((:u8 :i8)         :b)
+    ((:u32 :i32)       :w)
+    (:f32              :s)
+    ((:u64 :i64 :pointer) :l)
+    (:f64                   :d)
+    (:struct
+     (list :user-type
+           (substitute #\_ #\- (string-downcase (string (blub-struct-name field-type))))))
+    (t (error "blub-field-ext-type: unsupported type ~S" field-type))))
+
+(defun blub-struct->qbe-type (name layout struct-env)
+  "Build a QBE (:type ...) aggregate type declaration for a struct.
+   STRUCT-ENV is the pass-local map used to compute nested struct field sizes.
+   Includes explicit padding bytes so QBE's layout matches our computed offsets."
+  (let* ((fields (getf layout :fields))
+         (qname  (list :user-type
+                       (substitute #\_ #\- (string-downcase (string name)))))
+         (qfields '())
+         (cur 0))
+    (dolist (field fields)
+      (destructuring-bind (fname ftype foffset) field
+        (declare (ignore fname))
+        (when (> foffset cur)
+          (push (list :field :b (- foffset cur)) qfields))
+        (push (list :field (blub-field-ext-type ftype)) qfields)
+        (multiple-value-bind (fsize _) (blub-field-size-align ftype struct-env)
+          (declare (ignore _))
+          (setf cur (+ foffset fsize)))))
+    (let ((total (getf layout :size)))
+      (when (> total cur)
+        (push (list :field :b (- total cur)) qfields)))
+    (list* :type qname nil (nreverse qfields))))
+
+(defun blub-type->qbe-base (type)
+  "Map a blub (:type ...) node to the QBE base type keyword.
+   Returns NIL for :void (QBE omits the return type on void functions).
+   Function pointer types (:fn ...) map to :l (pointer-sized)."
+  (case (blub-type-inner type)
+    ((:u8 :i8 :u32 :i32) :w)
+    ((:u64 :i64) :l)
+    (:f32 :s)
+    (:f64 :d)
+    ((:pointer :fn) :l)
+    (:void nil)
+    (t (error "blub-type->qbe-base: unrecognized type ~S" type))))
+
+(defun blub-type->qbe-abity (type)
+  "Map a blub type to a QBE ABITY (for function params and return types).
+   Like blub-type->qbe-base, but also handles struct types as (:user-type name)."
+  (if (eq (blub-type-inner type) :struct)
+    (list :user-type
+          (substitute #\_ #\- (string-downcase (string (blub-struct-name type)))))
+    (blub-type->qbe-base type)))
+
 
 ;; --- Block-building helpers ---
 
