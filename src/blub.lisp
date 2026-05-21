@@ -191,28 +191,32 @@
 
 (defvar *blub-struct-env* (fset:empty-map)
   "Maps struct name symbols -> plist (:size N :align N :fields ((name type offset)...)).
-   Populated by the :module handler in passes 2, 3, and 5 via pre-scan.")
+   Populated by pass 2's :module handler. Passes 3 and 5 use their own
+   pass-local bindings (*tc-struct-env* and *b5-struct-env*) initialized
+   from :meta, and never touch this variable.")
 
-(defun blub-type->alloc-op (type)
-  "Return the QBE stack-allocation opcode appropriate for a blub type."
+(defun blub-type->alloc-op (type struct-env)
+  "Return the QBE stack-allocation opcode appropriate for a blub type.
+   STRUCT-ENV is the caller's pass-local struct layout map."
   (case (blub-type-inner type)
     ((:u8 :i8 :u32 :i32 :f32) :alloc4)
     ((:u64 :i64 :f64 :pointer :fn)                :alloc8)
     (:struct
-     (let* ((layout (nth-value 0 (fset:lookup *blub-struct-env* (blub-struct-name type))))
+     (let* ((layout (nth-value 0 (fset:lookup struct-env (blub-struct-name type))))
             (align  (getf layout :align)))
        (cond ((<= align 4) :alloc4)
              ((<= align 8) :alloc8)
              (t :alloc16))))
     (t (error "blub-type->alloc-op: cannot alloc type ~S" type))))
 
-(defun blub-type->alloc-size (type)
-  "Return the byte count to allocate for a blub type."
+(defun blub-type->alloc-size (type struct-env)
+  "Return the byte count to allocate for a blub type.
+   STRUCT-ENV is the caller's pass-local struct layout map."
   (case (blub-type-inner type)
     ((:u8 :i8 :u32 :i32 :f32) 4)
     ((:u64 :i64 :f64 :pointer :fn)                8)
     (:struct
-     (getf (nth-value 0 (fset:lookup *blub-struct-env* (blub-struct-name type))) :size))
+     (getf (nth-value 0 (fset:lookup struct-env (blub-struct-name type))) :size))
     (t (error "blub-type->alloc-size: cannot size type ~S" type))))
 
 (defun blub-type->load-op (type)
@@ -343,27 +347,29 @@
   "Round N up to the nearest multiple of ALIGNMENT."
   (if (zerop alignment) n (* (ceiling n alignment) alignment)))
 
-(defun blub-field-size-align (field-type)
-  "Return (values byte-size alignment) for a blub type, using C-compatible rules."
+(defun blub-field-size-align (field-type struct-env)
+  "Return (values byte-size alignment) for a blub type, using C-compatible rules.
+   STRUCT-ENV is the caller's pass-local struct layout map."
   (case (blub-type-inner field-type)
     ((:u8 :i8)         (values 1 1))
     ((:u32 :i32 :f32)  (values 4 4))
     ((:u64 :i64 :f64 :pointer) (values 8 8))
     (:struct
      (let* ((sname (blub-struct-name field-type))
-            (layout (nth-value 0 (fset:lookup *blub-struct-env* sname))))
+            (layout (nth-value 0 (fset:lookup struct-env sname))))
        (unless layout
          (error "blub-field-size-align: unknown struct ~S" sname))
        (values (getf layout :size) (getf layout :align))))
     (t (error "blub-field-size-align: unknown type ~S" field-type))))
 
-(defun blub-compute-struct-layout (fields)
+(defun blub-compute-struct-layout (fields struct-env)
   "Given FIELDS as a list of (type name) pairs, compute C-compatible struct layout.
+   STRUCT-ENV is the pass-local map used to resolve nested struct field sizes.
    Returns a plist (:size N :align N :fields ((name type offset)...))."
   (let ((offset 0) (max-align 1) (resolved '()))
     (dolist (field fields)
       (destructuring-bind (ftype fname) field
-        (multiple-value-bind (fsize falign) (blub-field-size-align ftype)
+        (multiple-value-bind (fsize falign) (blub-field-size-align ftype struct-env)
           (setf max-align (max max-align falign))
           (let ((ao (round-up-to offset falign)))
             (push (list fname ftype ao) resolved)
@@ -385,8 +391,9 @@
            (substitute #\_ #\- (string-downcase (string (blub-struct-name field-type))))))
     (t (error "blub-field-ext-type: unsupported type ~S" field-type))))
 
-(defun blub-struct->qbe-type (name layout)
+(defun blub-struct->qbe-type (name layout struct-env)
   "Build a QBE (:type ...) aggregate type declaration for a struct.
+   STRUCT-ENV is the pass-local map used to compute nested struct field sizes.
    Includes explicit padding bytes so QBE's layout matches our computed offsets."
   (let* ((fields (getf layout :fields))
          (qname  (list :user-type
@@ -399,7 +406,7 @@
         (when (> foffset cur)
           (push (list :field :b (- foffset cur)) qfields))
         (push (list :field (blub-field-ext-type ftype)) qfields)
-        (multiple-value-bind (fsize _) (blub-field-size-align ftype)
+        (multiple-value-bind (fsize _) (blub-field-size-align ftype struct-env)
           (declare (ignore _))
           (setf cur (+ foffset fsize)))))
     (let ((total (getf layout :size)))
@@ -579,7 +586,7 @@
 ;;   (:defstruct name (type1 field1) (type2 field2) ...)
 ;; into:
 ;;   (:defstruct name total-size alignment (field1 type1 offset1) ...)
-;; This annotated form is consumed by passes 3 and 5 to populate *blub-struct-env*.
+;; This annotated form is consumed by passes 3 and 5 via :struct-env in :meta.
 ;;
 ;; Structs referencing other structs must be defined before they are used.
 
@@ -589,8 +596,7 @@
 (def-op *blub-2* (:defstruct name &rest fields)
   ;; Resolve C-compatible layout for this struct definition.
   ;; Fields from the grammar are (type name) pairs.
-  (let ((layout (let ((*blub-struct-env* *blub-struct-env*)) ; use current env for nested structs
-                  (blub-compute-struct-layout fields))))
+  (let ((layout (blub-compute-struct-layout fields *blub-struct-env*)))
     ;; Register this struct so subsequent :defstruct nodes can reference it.
     (setf *blub-struct-env* (fset:with *blub-struct-env* name layout))
     ;; Annotated form: (:defstruct name size align (fname ftype offset) ...)
@@ -641,6 +647,10 @@
 
 (defvar *tc-return-type* nil
   "Declared return type of the current function. Set by :function.")
+
+(defvar *tc-struct-env* (fset:empty-map)
+  "Maps struct name symbols -> layout plists for pass 3. Rebound by :module
+   from the :struct-env entry in :meta. Never shared with other passes.")
 
 
 ;; --- Type predicate helpers ---
@@ -866,7 +876,7 @@
              (st     (blub-type-of se))
              (sname  (if (eq (blub-type-inner st) :struct) (blub-struct-name st)
                          (error "typecheck: :set (:.) applied to non-struct type ~S" st))))
-        (multiple-value-bind (layout found) (fset:lookup *blub-struct-env* sname)
+        (multiple-value-bind (layout found) (fset:lookup *tc-struct-env* sname)
           (unless found (error "typecheck: :set unknown struct ~A" sname))
           (let ((field-entry (find field-name (getf layout :fields) :key #'car)))
             (unless field-entry
@@ -951,7 +961,7 @@
              ((and st (eq (blub-type-inner st) :struct))
               (blub-struct-name st))
              (t (error "typecheck: (:.) applied to non-struct type ~S" st)))))
-    (multiple-value-bind (layout found) (fset:lookup *blub-struct-env* sname)
+    (multiple-value-bind (layout found) (fset:lookup *tc-struct-env* sname)
       (unless found
         (error "typecheck: unknown struct ~A in field access" sname))
       (let ((field-entry (find field-name (getf layout :fields) :key #'car)))
@@ -965,7 +975,7 @@
   ;; Phase 1: build struct, global, and function-signature tables so all bodies
   ;; can reference them regardless of textual order.
   (multiple-value-bind (meta items) (extract-meta body)
-    (let ((*blub-struct-env*    (if (meta-get meta :struct-env)
+    (let ((*tc-struct-env*     (if (meta-get meta :struct-env)
                                   (alist->fset-map (meta-get meta :struct-env))
                                   (fset:empty-map)))
           (*tc-global-type-env* (fset:empty-map))
@@ -976,8 +986,8 @@
           (when (and (consp decl) (eq (car decl) :defstruct))
             (destructuring-bind (kw sname ssize salign &rest sfields) decl
               (declare (ignore kw))
-              (setf *blub-struct-env*
-                    (fset:with *blub-struct-env* sname
+              (setf *tc-struct-env*
+                    (fset:with *tc-struct-env* sname
                                (list :size ssize :align salign :fields sfields)))))))
       ;; Pre-scan globals (always needed: forward references to global vars).
       (dolist (decl items)
@@ -998,7 +1008,7 @@
              (new-meta  (meta-set
                          (meta-set
                           (meta-set meta
-                                    :struct-env (fset-map->alist *blub-struct-env*))
+                                    :struct-env (fset-map->alist *tc-struct-env*))
                           :global-env (fset-map->alist *tc-global-type-env*))
                          :fn-sigs (fset-map->alist *tc-fn-sigs*))))
         (append (list* :module processed) (list new-meta))))))
@@ -1227,6 +1237,10 @@
 
 (defvar *b5-type-env* (fset:empty-map)
   "Maps blub variable name symbols -> their blub (:type ...) nodes.")
+
+(defvar *b5-struct-env* (fset:empty-map)
+  "Maps struct name symbols -> layout plists for pass 5. Rebound by :module
+   from the :struct-env entry in :meta. Never shared with other passes.")
 
 (defvar *b5-global-env* (fset:empty-map)
   "Maps global variable name symbols -> (:global name) QBE address form.")
@@ -1601,8 +1615,8 @@
   ;; Allocate stack space for a local variable and register it.
   ;; After pass 0, :declare never carries an initializer value.
   (let* ((ptr   (b5-temp (format nil "~A.ptr" name)))
-         (alloc (blub-type->alloc-op type))
-         (size  (blub-type->alloc-size type)))
+         (alloc (blub-type->alloc-op type *b5-struct-env*))
+         (size  (blub-type->alloc-size type *b5-struct-env*)))
     ;; alloc4/alloc8 returns an :l (pointer-sized) temp.
     (b5-emit (list :assign (b5-wrap-temp ptr) :l alloc size))
     ;; Register variable for later :var and :assign lookups.
@@ -1767,8 +1781,8 @@
                              ;; Struct param: incoming aggregate value IS a pointer.
                              ;; Copy it to a fresh local slot so the param is mutable.
                              (let* ((ptr-tmp  (b5-temp (format nil "~A.ptr" arg-name)))
-                                    (alloc-op (blub-type->alloc-op arg-type))
-                                    (size     (blub-type->alloc-size arg-type)))
+                                    (alloc-op (blub-type->alloc-op arg-type *b5-struct-env*))
+                                    (size     (blub-type->alloc-size arg-type *b5-struct-env*)))
                                (b5-emit (list :assign (b5-wrap-temp ptr-tmp) :l alloc-op size))
                                (b5-emit (list :instr :blit
                                               (b5-wrap-temp in-tmp)
@@ -1780,8 +1794,8 @@
                             (t
                              ;; Scalar param: alloc stack slot, store incoming value.
                              (let* ((ptr-tmp  (b5-temp (format nil "~A.ptr" arg-name)))
-                                    (alloc-op (blub-type->alloc-op arg-type))
-                                    (size     (blub-type->alloc-size arg-type))
+                                    (alloc-op (blub-type->alloc-op arg-type *b5-struct-env*))
+                                    (size     (blub-type->alloc-size arg-type *b5-struct-env*))
                                     (store-op (blub-type->store-op arg-type))
                                     (qbase    (blub-type->qbe-base arg-type)))
                                (b5-emit (list :assign (b5-wrap-temp ptr-tmp) :l alloc-op size))
@@ -1805,32 +1819,32 @@
   ;; Read struct-env and global-env from :meta; initialize dynamic envs.
   ;; Output: QBE module with type defs, data items, functions (no :meta).
   (multiple-value-bind (meta items) (extract-meta body)
-    (let ((*b5-global-env*      (fset:empty-map))
-          (*b5-global-type-env* (fset:empty-map))
-          (*blub-struct-env*    (fset:empty-map)))
+    (let ((*b5-struct-env*      (fset:empty-map))
+          (*b5-global-env*      (fset:empty-map))
+          (*b5-global-type-env* (fset:empty-map)))
       (let* ((struct-forms (filter items (node-is-p :defstruct)))
              (global-forms (filter items (node-is-p :global)))
              (other-forms  (filter items (lambda (n)
                                            (and (consp n)
                                                 (not (eq (car n) :defstruct))
                                                 (not (eq (car n) :global))))))
-             ;; Build QBE type defs and populate *blub-struct-env*.
+             ;; Build QBE type defs and populate *b5-struct-env*.
              (qbe-types
                (if (meta-get meta :struct-env)
                  ;; Use struct-env from :meta: no body re-scan needed.
                  (mapcar (lambda (pair)
-                           (setf *blub-struct-env*
-                                 (fset:with *blub-struct-env* (car pair) (cdr pair)))
-                           (blub-struct->qbe-type (car pair) (cdr pair)))
+                           (setf *b5-struct-env*
+                                 (fset:with *b5-struct-env* (car pair) (cdr pair)))
+                           (blub-struct->qbe-type (car pair) (cdr pair) *b5-struct-env*))
                          (meta-get meta :struct-env))
                  ;; Fallback: build from annotated :defstruct forms in body.
                  (mapcar (lambda (s)
                            (destructuring-bind (kw sname ssize salign &rest sfields) s
                              (declare (ignore kw))
                              (let ((layout (list :size ssize :align salign :fields sfields)))
-                               (setf *blub-struct-env*
-                                     (fset:with *blub-struct-env* sname layout))
-                               (blub-struct->qbe-type sname layout))))
+                               (setf *b5-struct-env*
+                                     (fset:with *b5-struct-env* sname layout))
+                               (blub-struct->qbe-type sname layout *b5-struct-env*))))
                          struct-forms))))
         ;; Populate global env from :meta, or pre-scan global forms as fallback.
         (if (meta-get meta :global-env)
