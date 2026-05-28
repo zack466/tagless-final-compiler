@@ -33,19 +33,19 @@
   (:defstruct point ((:type :i32) x) ((:type :i32) y))
 
   (:function (:type :i32) get-x
-    (:args ((:type (:pointer (:type (:struct point)))) p))
+    ((:type (:pointer (:type (:struct point)))) p)
     (:block (:return (:. (:deref (:var p)) x))))
 
   (:function (:type :i32) get-y
-    (:args ((:type (:pointer (:type (:struct point)))) p))
+    ((:type (:pointer (:type (:struct point)))) p)
     (:block (:return (:. (:deref (:var p)) y))))
 
   (:function (:type :i32) apply-to-point
-    (:args ((:type (:fn (:type :i32) (:type (:pointer (:type (:struct point)))))) fn)
-           ((:type (:pointer (:type (:struct point)))) p))
+    ((:type (:fn (:type :i32) (:type (:pointer (:type (:struct point)))))) fn)
+    ((:type (:pointer (:type (:struct point)))) p)
     (:block (:return (:call (:var fn) (:var p)))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:declare (:type (:struct point)) pt)
       (:set (:. (:var pt) x) 10)

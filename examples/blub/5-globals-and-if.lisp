@@ -25,7 +25,7 @@
   (:global (:type :i32) THRESHOLD 100)
 
   (:function (:type :i32) clamp
-    (:args ((:type :i32) x))
+    ((:type :i32) x)
     (:block
       (:declare (:type :i32) result 0)
       (:set result (:var x))
@@ -34,6 +34,6 @@
           (:set result (:var THRESHOLD))))
       (:return (:var result))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:return (:call clamp 150)))))   ; expected exit code: 100

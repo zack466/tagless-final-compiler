@@ -21,13 +21,13 @@
 ;;; }
 (:module
   (:function (:type :i32) compute
-    (:args ((:type :i32) a) ((:type :i32) b)
-           ((:type :i32) c) ((:type :i32) d))
+    ((:type :i32) a) ((:type :i32) b)
+    ((:type :i32) c) ((:type :i32) d)
     (:block
       (:return (:sub (:add (:mul (:var a) (:var b))
                            (:mul (:var c) (:var d)))
                      1))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:return (:call compute 3 7 4 5)))))   ; expected exit code: 40

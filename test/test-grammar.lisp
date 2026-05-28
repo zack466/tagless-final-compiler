@@ -163,13 +163,13 @@
 
     (deftest "function-empty-body"
       (assert-grammar
-        '(:function (:type :i32) main (:args) (:block))
+        '(:function (:type :i32) main (:block))
         :function rules))
 
     (deftest "function-with-args-and-body"
       (assert-grammar
         '(:function (:type :i32) qbe_main
-                    (:args ((:type :i32) x))
+                    ((:type :i32) x)
                     (:block
                       (:declare (:type :i32) y 2)
                       (:set y (:add (:var x) (:var y)))))
@@ -180,7 +180,7 @@
         '(:module
           (:global (:type :f64) z 10.2)
           (:global (:type :f64) a 1.5)
-          (:function (:type :i32) main (:args) (:block)))
+          (:function (:type :i32) main (:block)))
         :module rules))
 
     (deftest "module-rejects-stray"
@@ -245,7 +245,7 @@
     (deftest "function-with-control-flow"
       (assert-grammar
         '(:function (:type :i32) max
-                    (:args ((:type :i32) a) ((:type :i32) b))
+                    ((:type :i32) a) ((:type :i32) b)
                     (:block
                       (:if (:gt (:var a) (:var b))
                            (:block (:return (:var a)))

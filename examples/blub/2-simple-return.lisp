@@ -8,6 +8,6 @@
 ;;; extern int qbe_main();
 ;;; int main() { return qbe_main(); }
 (:module
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:return 42))))   ; expected exit code: 42

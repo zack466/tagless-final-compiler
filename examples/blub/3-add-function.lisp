@@ -21,11 +21,11 @@
 ;;; }
 (:module
   (:function (:type :i32) add
-    (:args ((:type :i32) a) ((:type :i32) b))
+    ((:type :i32) a) ((:type :i32) b)
     (:block
       (:return (:add (:var a) (:var b)))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:declare (:type :i32) result 0)
       (:set result (:call add 10 32))

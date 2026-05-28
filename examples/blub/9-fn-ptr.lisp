@@ -24,18 +24,18 @@
 ;;; }
 (:module
   (:function (:type :i32) double-it
-    (:args ((:type :i32) x))
+    ((:type :i32) x)
     (:block (:return (:mul (:var x) 2))))
 
   (:function (:type :i32) triple
-    (:args ((:type :i32) x))
+    ((:type :i32) x)
     (:block (:return (:mul (:var x) 3))))
 
   (:function (:type :i32) apply
-    (:args ((:type (:fn (:type :i32) (:type :i32))) fn) ((:type :i32) x))
+    ((:type (:fn (:type :i32) (:type :i32))) fn) ((:type :i32) x)
     (:block (:return (:call (:var fn) (:var x)))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:declare (:type :i32) r 0)
       (:set r (:add (:call apply (:fn-ptr double-it) 5)

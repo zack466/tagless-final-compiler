@@ -9,10 +9,7 @@
       (identifier) (repeat0 (list :type (identifier))))
 
     (:function
-     :type (identifier) :args :block)
-
-    (:args
-     (repeat0 (list :type (identifier))))
+     :type (identifier) (repeat0 (list :type (identifier))) :block)
 
     (:block
      (repeat0 :statement))
@@ -214,9 +211,11 @@
   ;; Pointer-to-struct field access: desugar to (:. (:deref ptr) field).
   (list :. (list :deref (recurse struct-expr)) field))
 
-(def-op *blub-0* (:function type name args block)
+(def-op *blub-0* (:function type name &rest args-and-body)
   ;; Recurse into the body block so nested declarations get desugared.
-  (list :function type name args (recurse block)))
+  (let ((args (butlast args-and-body))
+        (block (car (last args-and-body))))
+    (list* :function type name (append args (list (recurse block))))))
 
 (def-op *blub-0* (:defstruct name &rest fields)
   ;; Struct definitions have no statements to desugar; pass through unchanged.
@@ -315,21 +314,22 @@
   (let ((*rename-env* *rename-env*))
     (cons :block (mapcar #'recurse body))))
 
-(def-op *blub-1* (:function type name args block)
+(def-op *blub-1* (:function type name &rest args-and-body)
   (let ((*rename-env* *rename-env*))
     ;; Each ARG is a (type name) pair; we register the name (which may shadow
     ;; an outer global with the same name) and rebuild the pair using the
     ;; chosen new name.
-    (let ((renamed-args
-            (cons :args
-                  (mapcar (lambda (arg)
-                            (destructuring-bind (arg-type arg-name) arg
-                              (let* ((new-name  (register-local arg-name))
-                                     (new-pair  (list arg-type new-name)))
-                                (inherit-from new-pair arg)
-                                new-pair)))
-                          (cdr args)))))
-      (list :function type name renamed-args (recurse block)))))
+    (let* ((args (butlast args-and-body))
+           (block (car (last args-and-body)))
+           (renamed-args
+             (mapcar (lambda (arg)
+                       (destructuring-bind (arg-type arg-name) arg
+                         (let* ((new-name  (register-local arg-name))
+                                (new-pair  (list arg-type new-name)))
+                           (inherit-from new-pair arg)
+                           new-pair)))
+                     args)))
+      (list* :function type name (append renamed-args (list (recurse block)))))))
 
 (def-op *blub-1* (:defstruct name &rest fields)
   ;; Struct definitions have no variable names; pass through unchanged.
@@ -786,16 +786,18 @@
       (progn (tc-lower-expr value) (list :global type name value))
       (list :global type name)))
 
-(def-op *blub-3* (:function ret-type name args body)
+(def-op *blub-3* (:function ret-type name &rest args-and-body)
   ;; Each function gets a fresh local type env. Globals remain visible
   ;; via *tc-global-type-env* (not rebound here).
-  (let* ((*tc-var-type-env* (fset:empty-map))
+  (let* ((args (butlast args-and-body))
+         (body (car (last args-and-body)))
+         (*tc-var-type-env* (fset:empty-map))
          (*tc-return-type*  ret-type))
     ;; Register parameter types before recursing the body.
-    (dolist (arg (cdr args))
+    (dolist (arg args)
       (destructuring-bind (arg-type arg-name) arg
         (setf *tc-var-type-env* (fset:with *tc-var-type-env* arg-name arg-type))))
-    (list :function ret-type name args (recurse body))))
+    (list* :function ret-type name (append args (list (recurse body))))))
 
 (def-op *blub-3* (:defstruct name size align &rest fields)
   ;; Struct definition already resolved by pass 2; pass through.
@@ -848,11 +850,12 @@
       ;; Pre-scan function signatures (always needed: mutual recursion).
       (dolist (decl items)
         (when (and (consp decl) (eq (car decl) :function))
-          (destructuring-bind (kw fn-ret fn-name fn-args fn-body) decl
-            (declare (ignore kw fn-body))
+          (let* ((fn-ret  (second decl))
+                 (fn-name (third decl))
+                 (fn-args (butlast (cdddr decl))))
             (setf *tc-fn-sigs*
                   (fset:with *tc-fn-sigs* fn-name
-                             (cons fn-ret (mapcar #'car (cdr fn-args))))))))
+                             (cons fn-ret (mapcar #'car fn-args)))))))
       ;; Phase 2: typecheck every declaration, then store all envs in :meta.
       (let* ((processed (mapcar #'recurse items))
              (new-meta  (meta-set
@@ -1038,8 +1041,10 @@
 (def-op *blub-4* (:global type name &optional value)
   (if value (list :global type name value) (list :global type name)))
 
-(def-op *blub-4* (:function ret-type name args body)
-  (list :function ret-type name args (recurse body)))
+(def-op *blub-4* (:function ret-type name &rest args-and-body)
+  (let ((args (butlast args-and-body))
+        (body (car (last args-and-body))))
+    (list* :function ret-type name (append args (list (recurse body))))))
 
 (def-op *blub-4* (:defstruct name size align &rest fields)
   ;; Pass through unchanged; struct layout was resolved by pass 2.
@@ -1758,9 +1763,11 @@
   ;; (the QBE :type def is emitted by the :module handler).
   nil)
 
-(def-op *blub-5* (:function ret-type name args body)
+(def-op *blub-5* (:function ret-type name &rest args-and-body)
   ;; Lower a function to a QBE :function form.
-  (let* ((*b5-stmts*       nil)
+  (let* ((args (butlast args-and-body))
+         (body (car (last args-and-body)))
+         (*b5-stmts*       nil)
          (*b5-blocks*      nil)
          (*b5-var-env*     *b5-var-env*)
          (*b5-type-env*    *b5-type-env*)
@@ -1805,7 +1812,7 @@
                                (setf *b5-var-env*  (fset:with *b5-var-env*  arg-name (b5-wrap-temp ptr-tmp)))
                                (setf *b5-type-env* (fset:with *b5-type-env* arg-name arg-type))
                                (list :param qbase (b5-wrap-temp in-tmp))))))))
-                    (cdr args))))
+                    args)))
       (recurse body)
       (unless *b5-terminated*
         (b5-finish-block (if qbe-ret (list :ret 0) '(:ret))))

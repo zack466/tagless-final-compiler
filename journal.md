@@ -234,3 +234,7 @@ TODO:
 
 # 5/21/26
 - TODO: read Chapter 8 of Essentials of Compilation
+
+# 5/27/26
+- TODO: could be useful to have a simple parser for each language (since sexps aren't the easiest to write)
+  - and can also have formatted output "as" each language

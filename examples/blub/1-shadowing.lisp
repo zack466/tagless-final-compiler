@@ -26,7 +26,7 @@
 ;;;     return qbe_main();
 ;;; }
 (:module
-  (:function (:type :i32) shadow-test (:args)
+  (:function (:type :i32) shadow-test
     (:block
       (:declare (:type :i32) x 10)
       (:declare (:type :i32) y (:var x))
@@ -34,6 +34,6 @@
       (:set y (:add (:var y) (:var x)))
       (:return (:var y))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:return (:call shadow-test)))))   ; expected exit code: 30

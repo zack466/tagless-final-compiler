@@ -16,14 +16,14 @@
 
 ;; A :declare with a value should split into two statements.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block
                    (:declare (:type :i32) x 5)
                    (:return (:var x))))))
        (out  (lower *blub-0* prog))
        ;; Navigate to the block's body.
        (fn   (second out))
-       (blk  (fifth fn))
+       (blk  (fourth fn))
        (stmts (cdr blk)))   ; strip :block head
   ;; The single (:declare ... 5) expands to two statements, plus the :return = 3.
   (deftest "pass-0: declare+value expands to 2 stmts (3 total)" (check (length stmts) 3))
@@ -36,24 +36,24 @@
 
 ;; A :declare without a value should pass through unchanged.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:declare (:type :i32) y)))))
        (out  (lower *blub-0* prog))
        (fn   (second out))
-       (blk  (fifth fn))
+       (blk  (fourth fn))
        (stmts (cdr blk)))
   (deftest "pass-0: declare without value -> 1 stmt" (check (length stmts) 1))
   (deftest "pass-0: no-value declare is :declare" (check (car (first stmts)) :declare)))
 
 ;; Multiple declarations in a block.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block
                    (:declare (:type :i32) a 1)
                    (:declare (:type :i32) b 2)
                    (:return (:var a))))))
        (out   (lower *blub-0* prog))
-       (stmts (cdr (fifth (second out)))))
+       (stmts (cdr (fourth (second out)))))
   ;; 2 declares + 1 return = 5 statements after desugaring.
   (deftest "pass-0: two declares+values expand to 5 stmts" (check (length stmts) 5)))
 
@@ -67,7 +67,7 @@
 
 ;; After pass 0 + pass 1, a shadowed variable gets a fresh name.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block
                    (:declare (:type :i32) x 0)
                    (:block
@@ -78,7 +78,7 @@
        ;; After pass-0: outer block = (:block (:declare t x) (:set x 0) (:block ...))
        ;; so the inner (:block) is now at position 4, not 3.
        (fn        (second a1))
-       (outer-blk (fifth fn))
+       (outer-blk (fourth fn))
        (outer-decl (second outer-blk))   ; (:declare (:type :i32) x)
        (inner-blk  (fourth outer-blk))   ; (:block (:declare ...) ...)
        (inner-decl (second inner-blk)))  ; (:declare (:type :i32) x')
@@ -88,7 +88,7 @@
 
 ;; Using a variable before it is declared should be caught by pass 1.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:var x))))))  ; x never declared
        (result (handler-case
                    (progn (lower *blub-1* (lower *blub-0* prog)) :no-error)
@@ -98,7 +98,7 @@
 ;; Function parameters are visible inside the function body.
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) n))
+                 ((:type :i32) n)
                  (:block (:return (:var n))))))
        (result (handler-case
                    (lower *blub-1* (lower *blub-0* prog))
@@ -109,12 +109,11 @@
 ;; whatever name pass 1 chose.
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) n))
+                 ((:type :i32) n)
                  (:block (:return (:var n))))))
        (a1      (lower *blub-1* (lower *blub-0* prog)))
        (fn      (second a1))
-       (args    (fourth fn))           ; (:args ((:type :i32) chosen-name))
-       (param   (second args))         ; ((:type :i32) chosen-name)
+       (param   (fourth fn))           ; ((:type :i32) chosen-name)
        (pname   (second param))
        (ret     (second (fifth fn)))   ; (:return (:var chosen-name))
        (var-name (second (second ret))))
@@ -123,7 +122,7 @@
 ;; Globals are registered before functions and are visible inside them.
 (let* ((prog '(:module
                (:global (:type :i32) G 0)
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:var G))))))
        (result (handler-case
                    (lower *blub-1* (lower *blub-0* prog))
@@ -199,7 +198,7 @@
 
 ;; A minimal function: just return a constant.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return 7)))))
        (qbe  (compile-blub prog)))
   (deftest "pass-5: module head is :module" (check (car qbe) :module))
@@ -234,7 +233,7 @@
 (defsuite "Pass 5: Locals -- declare, assign, load"
 
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block
                    (:declare (:type :i32) x)
                    (:set x 42)
@@ -273,7 +272,7 @@
 
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) a) ((:type :i32) b))
+                 ((:type :i32) a) ((:type :i32) b)
                  (:block (:return (:add (:var a) (:var b)))))))
        (qbe       (compile-blub prog))
        (fn        (second qbe))
@@ -301,7 +300,7 @@
 
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) x))
+                 ((:type :i32) x)
                  (:block
                    (:declare (:type :i32) r 0)
                    (:if (:gt (:var x) 0)
@@ -331,7 +330,7 @@
 
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) n))
+                 ((:type :i32) n)
                  (:block
                    (:declare (:type :i32) i 0)
                    (:while (:lt (:var i) (:var n))
@@ -367,9 +366,9 @@
 
 (let* ((prog '(:module
                (:function (:type :i32) add
-                 (:args ((:type :i32) a) ((:type :i32) b))
+                 ((:type :i32) a) ((:type :i32) b)
                  (:block (:return (:add (:var a) (:var b)))))
-               (:function (:type :i32) qbe_main (:args)
+               (:function (:type :i32) qbe_main
                  (:block (:return (:call add 3 4))))))
        (qbe  (compile-blub prog))
        ;; Second function is qbe_main.
@@ -395,7 +394,7 @@
 
 (let* ((prog '(:module
                (:global (:type :i32) LIMIT 100)
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:var LIMIT))))))
        (qbe (compile-blub prog)))
   ;; First child should be a :data item for the global.
@@ -421,7 +420,7 @@
 (defsuite "End-to-end: compile to QBE IL string"
 
 (let* ((prog '(:module
-               (:function (:type :i32) qbe_main (:args)
+               (:function (:type :i32) qbe_main
                  (:block (:return 0)))))
        (il-string (compile-blub-to-string prog)))
   (deftest "e2e: result is a string" (check-true (stringp il-string)))
@@ -433,7 +432,7 @@
 (let* ((fib-prog
         '(:module
           (:function (:type :i32) fib
-            (:args ((:type :i32) n))
+            ((:type :i32) n)
             (:block
               (:declare (:type :i32) a 0)
               (:declare (:type :i32) b 1)
@@ -446,7 +445,7 @@
                   (:set a   (:var tmp))
                   (:set i   (:add (:var i) 1))))
               (:return (:var a))))
-          (:function (:type :i32) qbe_main (:args)
+          (:function (:type :i32) qbe_main
             (:block (:return (:call fib 10))))))
        (il (handler-case (compile-blub-to-string fib-prog)
              (error (e) (format nil "ERROR: ~A" e)))))
@@ -465,7 +464,7 @@
 ;; Valid program should pass through unchanged.
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) x))
+                 ((:type :i32) x)
                  (:block (:return (:add (:var x) 1))))))
        (result (handler-case (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
                  (error (e) (format nil "ERROR: ~A" e)))))
@@ -473,7 +472,7 @@
 
 ;; :add with f64 on one side and i32 on the other should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:add 1 3.14))))))
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -484,9 +483,9 @@
 ;; Calling with wrong number of arguments should be caught.
 (let* ((prog '(:module
                (:function (:type :i32) add
-                 (:args ((:type :i32) a) ((:type :i32) b))
+                 ((:type :i32) a) ((:type :i32) b)
                  (:block (:return (:add (:var a) (:var b)))))
-               (:function (:type :i32) bad (:args)
+               (:function (:type :i32) bad
                  (:block (:return (:call add 1))))))  ; add takes 2, gets 1
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -496,7 +495,7 @@
 
 ;; Calling an undeclared function should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:call ghost 1 2))))))
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -506,7 +505,7 @@
 
 ;; Using a variable before declaration should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:var x))))))  ; x never declared
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -516,7 +515,7 @@
 
 ;; :return type mismatch should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return 3.14)))))  ; declares :i32, returns f64
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -526,7 +525,7 @@
 
 ;; :not on an f64 should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:not 3.14))))))
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -536,7 +535,7 @@
 
 ;; :if with an f64 condition should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block
                    (:declare (:type :i32) r 0)
                    (:if 3.14 (:block (:set r 1)))
@@ -550,7 +549,7 @@
 ;; Global variables visible inside functions.
 (let* ((prog '(:module
                (:global (:type :i32) LIMIT 100)
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:var LIMIT))))))
        (result (handler-case (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
                  (error (e) (format nil "ERROR: ~A" e)))))
@@ -558,7 +557,8 @@
 
 ;; After pass 3, expressions should be wrapped in (:typed type inner).
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args ((:type :i32) x))
+               (:function (:type :i32) f
+                 ((:type :i32) x)
                  (:block (:return (:add (:var x) 1))))))
        (a3 (lower *blub-3* (lower *blub-1* (lower *blub-0* prog))))
        ;; Navigate to the :return's expression.
@@ -573,7 +573,8 @@
 
 ;; :addr-of a variable should produce a pointer type.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args ((:type :i32) x))
+               (:function (:type :i32) f
+                 ((:type :i32) x)
                  (:block (:return (:cast (:type :i32) (:cast (:type :i64) (:addr-of (:var x)))))))))
        (result (handler-case
                    (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -582,7 +583,8 @@
 
 ;; :cast between compatible scalar types should succeed.
 (let* ((prog '(:module
-               (:function (:type :i64) f (:args ((:type :i32) x))
+               (:function (:type :i64) f
+                 ((:type :i32) x)
                  (:block (:return (:cast (:type :i64) (:var x)))))))
        (a3 (lower *blub-3* (lower *blub-1* (lower *blub-0* prog))))
        (fn     (second a3))
@@ -594,7 +596,8 @@
 
 ;; :cast to :void should be caught.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args ((:type :i32) x))
+               (:function (:type :i32) f
+                 ((:type :i32) x)
                  (:block (:return (:cast (:type :void) (:var x)))))))
        (result (handler-case
                    (progn (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))
@@ -604,11 +607,12 @@
 
 ;; :logand and :logor on integer operands should typecheck to :i32.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args ((:type :i32) a) ((:type :i32) b))
+               (:function (:type :i32) f
+                 ((:type :i32) a) ((:type :i32) b)
                  (:block (:return (:logand (:var a) (:var b)))))))
        (a3 (lower *blub-3* (lower *blub-1* (lower *blub-0* prog))))
        (fn  (second a3))
-       (ret (second (fifth fn)))
+       (ret (second (sixth fn)))
        (rv  (second ret)))
   (deftest "pass-3: :logand result type is :i32" (check (second rv) '(:type :i32))))
 
@@ -623,7 +627,7 @@
 ;; Nested (:set x (:add (:mul a b) c)) should produce an extra temp.
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) a) ((:type :i32) b) ((:type :i32) c))
+                 ((:type :i32) a) ((:type :i32) b) ((:type :i32) c)
                  (:block
                    (:declare (:type :i32) x 0)
                    (:set x (:add (:mul (:var a) (:var b)) (:var c)))
@@ -635,7 +639,7 @@
        (a4 (lower *blub-4* a3))
        ;; Collect all statements from the function body.
        (fn    (second a4))
-       (body  (fifth fn))          ; (:block ...)
+       (body  (car (last fn)))     ; (:block ...)
        (stmts (cdr body)))         ; strip :block head
   ;; The nested :mul should have been extracted: we expect more statements
   ;; than the original 3 (declare, assign, return).
@@ -669,7 +673,7 @@
 ;; An :if with a complex condition should hoist prefix stmts before the :if.
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) x) ((:type :i32) y))
+                 ((:type :i32) x) ((:type :i32) y)
                  (:block
                    (:declare (:type :i32) r 0)
                    (:if (:gt (:add (:var x) 1) (:var y))
@@ -680,7 +684,7 @@
        (a3 (lower *blub-3* a1))
        (a4 (lower *blub-4* a3))
        (fn    (second a4))
-       (body  (fifth fn))
+       (body  (car (last fn)))
        (stmts (cdr body)))
   ;; After normalization, (:add x 1) is atomic so the :gt can stay as-is,
   ;; but pass 4 may extract the :add sub-expression of :gt.  Either way,
@@ -698,7 +702,7 @@
 ;; :while condition should NOT be extracted (limitation: would break re-evaluation).
 (let* ((prog '(:module
                (:function (:type :i32) f
-                 (:args ((:type :i32) n))
+                 ((:type :i32) n)
                  (:block
                    (:declare (:type :i32) i 0)
                    (:while (:lt (:add (:var i) 1) (:var n))
@@ -730,11 +734,12 @@
 
 ;; A nested expression in a :return is also simplified.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args ((:type :i32) a) ((:type :i32) b))
+               (:function (:type :i32) f
+                 ((:type :i32) a) ((:type :i32) b)
                  (:block (:return (:add (:mul (:var a) 2) (:var b)))))))
        (a4  (lower *blub-4* (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))))
        (fn  (second a4))
-       (stmts (cdr (fifth fn))))
+       (stmts (cdr (car (last fn)))))
   ;; The :mul should be extracted: there must be an internal :assign :mul before the :return.
   (let ((mul-assign (find-if (lambda (s)
                                (and (consp s) (eq (car s) :assign)
@@ -747,13 +752,15 @@
 
 ;; Call arguments are atomized: (:call f (:add x y)) should produce a temp for :add.
 (let* ((prog '(:module
-               (:function (:type :i32) id (:args ((:type :i32) x))
+               (:function (:type :i32) id
+                 ((:type :i32) x)
                  (:block (:return (:var x))))
-               (:function (:type :i32) g (:args ((:type :i32) a) ((:type :i32) b))
+               (:function (:type :i32) g
+                 ((:type :i32) a) ((:type :i32) b)
                  (:block (:return (:call id (:add (:var a) (:var b))))))))
        (a4   (lower *blub-4* (lower *blub-3* (lower *blub-1* (lower *blub-0* prog)))))
        (g-fn (third a4))   ; second function
-       (stmts (cdr (fifth g-fn))))
+       (stmts (cdr (car (last g-fn)))))
   (let ((add-assign (find-if (lambda (s)
                                (and (consp s) (eq (car s) :assign)
                                     (let ((v (if (and (consp (caddr s))
@@ -767,7 +774,7 @@
 (let* ((fib-prog
         '(:module
           (:function (:type :i32) fib
-            (:args ((:type :i32) n))
+            ((:type :i32) n)
             (:block
               (:declare (:type :i32) a 0)
               (:declare (:type :i32) b 1)
@@ -780,7 +787,7 @@
                   (:set a   (:var tmp))
                   (:set i   (:add (:var i) 1))))
               (:return (:var a))))
-          (:function (:type :i32) qbe_main (:args)
+          (:function (:type :i32) qbe_main
             (:block (:return (:call fib 10))))))
        (il (handler-case (compile-blub-to-string fib-prog)
              (error (e) (format nil "ERROR: ~A" e)))))
@@ -796,12 +803,13 @@
 
 ;; (:fn-ptr name) should compile without error and produce a :global in the IL.
 (let* ((prog '(:module
-               (:function (:type :i32) double-it (:args ((:type :i32) x))
+               (:function (:type :i32) double-it
+                 ((:type :i32) x)
                  (:block (:return (:mul (:var x) 2))))
                (:function (:type :i32) apply
-                 (:args ((:type (:fn (:type :i32) (:type :i32))) fn) ((:type :i32) x))
+                 ((:type (:fn (:type :i32) (:type :i32))) fn) ((:type :i32) x)
                  (:block (:return (:call (:var fn) (:var x)))))
-               (:function (:type :i32) qbe_main (:args)
+               (:function (:type :i32) qbe_main
                  (:block (:return (:call apply (:fn-ptr double-it) 5))))))
        (il (handler-case (compile-blub-to-string prog)
              (error (e) (format nil "ERROR: ~A" e)))))
@@ -812,7 +820,7 @@
 
 ;; (:fn-ptr) to an undeclared function should be caught by pass 3.
 (let* ((prog '(:module
-               (:function (:type :i32) f (:args)
+               (:function (:type :i32) f
                  (:block (:return (:fn-ptr no-such-fn))))))
        (result (handler-case (progn (compile-blub prog) :no-error)
                  (error () :error))))
@@ -830,11 +838,11 @@
 (let* ((prog '(:module
                (:defstruct point ((:type :i32) x) ((:type :i32) y))
                (:function (:type :i32) sum-fields
-                 (:args ((:type (:pointer (:type (:struct point)))) p))
+                 ((:type (:pointer (:type (:struct point)))) p)
                  (:block
                    (:return (:add (:. (:deref (:var p)) x)
                                   (:. (:deref (:var p)) y)))))
-               (:function (:type :i32) qbe_main (:args)
+               (:function (:type :i32) qbe_main
                  (:block
                    (:declare (:type (:struct point)) pt)
                    (:set (:. (:var pt) x) 3)
@@ -867,16 +875,16 @@
 (let* ((prog '(:module
                (:defstruct point ((:type :i32) x) ((:type :i32) y))
                (:function (:type :i32) get-x
-                 (:args ((:type (:pointer (:type (:struct point)))) p))
+                 ((:type (:pointer (:type (:struct point)))) p)
                  (:block (:return (:. (:deref (:var p)) x))))
                (:function (:type :i32) get-y
-                 (:args ((:type (:pointer (:type (:struct point)))) p))
+                 ((:type (:pointer (:type (:struct point)))) p)
                  (:block (:return (:. (:deref (:var p)) y))))
                (:function (:type :i32) apply-to-point
-                 (:args ((:type (:fn (:type :i32) (:type (:pointer (:type (:struct point)))))) fn)
-                        ((:type (:pointer (:type (:struct point)))) p))
+                 ((:type (:fn (:type :i32) (:type (:pointer (:type (:struct point)))))) fn)
+                 ((:type (:pointer (:type (:struct point)))) p)
                  (:block (:return (:call (:var fn) (:var p)))))
-               (:function (:type :i32) qbe_main (:args)
+               (:function (:type :i32) qbe_main
                  (:block
                    (:declare (:type (:struct point)) pt)
                    (:set (:. (:var pt) x) 10)

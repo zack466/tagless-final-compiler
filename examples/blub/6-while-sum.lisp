@@ -22,7 +22,7 @@
 ;;; }
 (:module
   (:function (:type :i32) sum-to
-    (:args ((:type :i32) n))
+    ((:type :i32) n)
     (:block
       (:declare (:type :i32) i 1)
       (:declare (:type :i32) acc 0)
@@ -32,6 +32,6 @@
           (:set i   (:add (:var i) 1))))
       (:return (:var acc))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:return (:call sum-to 10)))))   ; expected exit code: 55

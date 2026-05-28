@@ -22,7 +22,7 @@
 ;;; }
 (:module
   (:function (:type :i32) fact
-    (:args ((:type :i32) n))
+    ((:type :i32) n)
     (:block
       (:declare (:type :i32) result 1)
       (:declare (:type :i32) i 1)
@@ -32,6 +32,6 @@
           (:set i      (:add (:var i) 1))))
       (:return (:var result))))
 
-  (:function (:type :i32) qbe_main (:args)
+  (:function (:type :i32) qbe_main
     (:block
       (:return (:call fact 5)))))   ; expected exit code: 120
