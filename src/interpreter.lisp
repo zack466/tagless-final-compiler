@@ -438,7 +438,7 @@
     `(let* ((,root (list nil))
             (*trace-stack* (list ,root))
             (,val (progn ,@body)))
-       (values ,val (nreverse (car ,root))))))
+       (print-trace (nreverse (car ,root))))))
 
 (defun print-trace (trace &key (stream *standard-output*) (indent 0)
                                (show-locations t))
