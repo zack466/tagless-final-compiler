@@ -231,3 +231,6 @@ TODO:
 - idea: define meta language that is expanded by def-op rules that I define, used to manipulate the AST
 - then have staging, so something like :qbe really expands into the :qbe-1, :qbe-2, etc passes
   - so basically i guess all the def-op rules I need is like the "core interpreter", so then I can start writing compiler passes in the language itself using macros instead of using def-op
+
+# 5/21/26
+- TODO: read Chapter 8 of Essentials of Compilation

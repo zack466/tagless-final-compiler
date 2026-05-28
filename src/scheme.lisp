@@ -73,7 +73,7 @@
 ; - A cons cell is a pointer to two heap-allocated values (the car, followed by the cdr).
 ; - Integers, booleans, and floats are as expected.
 ; - A lambda is a pointer to a closure (a heap-allocated array of values) and a function pointer
-;
+
 ; Core primitives:
 ; cons, car, cdr
 ; +, *, -, <, >, <=, >=, ==
@@ -102,8 +102,6 @@
 ;
 ; (binop x y) -> (call binop x y)
 ; val binop(val x, val y) {
-;    if (is_var(x)) x = get_var(x);
-;    if (is_var(y)) y = get_var(y);
 ;    if (!(numeric(x) && numeric(y))) {
 ;      error("error msg");
 ;    }

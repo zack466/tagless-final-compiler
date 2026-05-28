@@ -1881,7 +1881,7 @@
 
    The resulting QBE AST can be validated with VALIDATE-QBE and printed
    to a QBE IL string with (LOWER *QBE* result)."
-  (let* ((a0 (lower *blub-0* ast))
+  (let* ((a0 (lower *blub-0* (validate-blub ast)))
          (a1 (lower *blub-1* a0))
          (a2 (lower *blub-2* a1))   ; struct layout resolution
          (a3 (lower *blub-3* a2))   ; typecheck + annotate with :typed wrappers
