@@ -243,3 +243,17 @@ TODO:
 - fixed bugs in blub
 - finished Scheme language and added tests
 - write up final report
+
+# 6/5/26
+- interesting things to look into:
+  - [Medium Internal Representation](https://developers.redhat.com/blog/2020/01/20/mir-a-lightweight-jit-compiler-project#mir)
+    - Advanced Compiler Design and Implementation - Steven Muchnick 
+  - [Coalton](https://github.com/coalton-lang/coalton)
+  - [OxCaml](https://github.com/oxcaml/oxcaml)
+  - GHC
+    - C--
+  - [LLVM](https://llvm.org/docs/LangRef.html)
+  - how [Chicken Scheme](https://www.call-cc.org/) compiles to C, and [Chez Scheme](https://github.com/cisco/chezscheme)
+  - CPS / ANF program transformations and optimizations
+  - how [SBCL](https://github.com/sbcl/sbcl) is compiled
+  - a review of language IRs
