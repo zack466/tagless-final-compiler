@@ -436,13 +436,17 @@
   "Run BODY with tracing enabled. Returns (values BODY-VALUE TRACE),
    where TRACE is a list of TRACE-ENTRY trees -- one per top-level
    LOWER call performed in BODY."
-  (let ((root (gensym "ROOT"))
-        (val  (gensym "VAL")))
+  (let ((root  (gensym "ROOT"))
+        (val   (gensym "VAL"))
+        (trace (gensym "TRACE")))
     `(let* ((,root (list nil))
             (*trace-stack* (list ,root))
-            (,val (progn ,@body)))
-       (print-trace (nreverse (car ,root)))
-       (values ,val (nreverse (car ,root))))))
+            (,val (progn ,@body))
+            ;; Reverse once; calling nreverse on (car ,root) twice would
+            ;; mutate the chain so the second reverse only sees the tail.
+            (,trace (nreverse (car ,root))))
+       (print-trace ,trace)
+       (values ,val ,trace))))
 
 (defun print-trace (trace &key (stream *standard-output*) (indent 0)
                                (show-locations t))

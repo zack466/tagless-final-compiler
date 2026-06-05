@@ -327,6 +327,88 @@
                  (error (e) (declare (ignore e)) :error))))
   (deftest "pass-3: :shl on float operand caught" (check result :error)))
 
+;; --- Variadic functions ---
+
+;; Variadic function definition lowers to a (:param :... nil) marker.
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 ((:type :i32) n) (:varargs)
+                 (:block
+                   (:declare (:type :valist) ap)
+                   (:vastart ap)
+                   (:return (:vaarg ap (:type :i32)))))))
+       (qbe        (compile-blub prog))
+       (fn         (second qbe))
+       (params     (fifth fn)))
+  (deftest "pass-5: variadic param list has trailing :..."
+    (check (second (car (last params))) :...))
+  (let* ((all-instrs (mapcan (lambda (b) (copy-list (cdr b)))
+                             (cddr (cddr fn))))
+         (vastart    (find-if (lambda (i)
+                                (and (consp i) (eq (car i) :instr)
+                                     (eq (cadr i) :vastart)))
+                              all-instrs))
+         (vaarg      (find-if (lambda (i)
+                                (and (consp i) (eq (car i) :assign)
+                                     (eq (fourth i) :vaarg)))
+                              all-instrs)))
+    (deftest "pass-5: :vastart instruction emitted" (check-true vastart))
+    (deftest "pass-5: :vaarg instruction emitted" (check-true vaarg))))
+
+;; A call to a variadic function emits a (:call-arg :... nil) separator.
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 ((:type :i32) n) (:varargs)
+                 (:block (:return (:var n))))
+               (:function (:type :i32) qbe_main
+                 (:block (:return (:call f 1 (:varargs) 2 3))))))
+       (qbe        (compile-blub prog))
+       (main-fn    (third qbe))
+       (all-instrs (mapcan (lambda (b) (copy-list (cdr b)))
+                           (cddr (cddr main-fn))))
+       (call-instr (find-if (lambda (i)
+                              (and (consp i) (eq (car i) :call-assign)))
+                            all-instrs))
+       (call-args  (when call-instr (cddddr call-instr)))
+       (vararg-sep (find-if (lambda (a)
+                              (and (consp a) (eq (car a) :call-arg)
+                                   (eq (cadr a) :...)))
+                            call-args)))
+  (deftest "pass-5: variadic call emits :... separator" (check-true vararg-sep)))
+
+;; Typechecker rejects calling a variadic fn without (:varargs).
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 ((:type :i32) n) (:varargs)
+                 (:block (:return (:var n))))
+               (:function (:type :i32) g
+                 (:block (:return (:call f 1 2 3))))))
+       (result (handler-case (compile-blub prog)
+                 (error (e) (declare (ignore e)) :error))))
+  (deftest "pass-3: variadic call missing (:varargs) caught" (check result :error)))
+
+;; Typechecker rejects (:varargs) marker in calls to non-variadic fns.
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 ((:type :i32) n)
+                 (:block (:return (:var n))))
+               (:function (:type :i32) g
+                 (:block (:return (:call f 1 (:varargs) 2))))))
+       (result (handler-case (compile-blub prog)
+                 (error (e) (declare (ignore e)) :error))))
+  (deftest "pass-3: (:varargs) on non-variadic call caught" (check result :error)))
+
+;; Typechecker rejects :vastart on a non-valist variable.
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 (:block
+                   (:declare (:type :i32) x 0)
+                   (:vastart x)
+                   (:return 0)))))
+       (result (handler-case (compile-blub prog)
+                 (error (e) (declare (ignore e)) :error))))
+  (deftest "pass-3: :vastart on non-valist caught" (check result :error)))
+
 ;;; ==========================================================================
 ;;; Pass 5: If statement
 ;;; ==========================================================================

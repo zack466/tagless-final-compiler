@@ -8,8 +8,14 @@
     (:defstruct
       (identifier) (repeat0 (list :type (identifier))))
 
+    ;; A function may end its parameter list with a (:varargs) marker to
+    ;; indicate it is variadic.
     (:function
-     :type (identifier) (repeat0 (list :type (identifier))) :block)
+     :type (identifier)
+     (repeat0 (option (list :type (identifier)) :varargs))
+     :block)
+
+    (:varargs)
 
     (:block
      (repeat0 :statement))
@@ -52,6 +58,8 @@
       (keyword :u32)  (keyword :i32)
       (keyword :u64)  (keyword :i64)
       (keyword :f32)  (keyword :f64)
+      ;; Variadic-argument list buffer; sized to fit any QBE target.
+      (keyword :valist)
       :pointer :struct :fn))
 
     (:pointer :type)
@@ -88,17 +96,15 @@
        :vaarg :vastart
        )))
 
-    ;; variadic arguments
-    ;; TODO: implement
-
-    ;; equivalent to:
-    ;;   va_list ap;
-    ;;   va_start(ap, count);
-    (:vastart :expr)
-
-    ;; equivalent to:
-    ;;   va_arg(ap, count);
-    (:vaarg (identifier) :type)
+    ;; Variadic arguments.  AP must name a local of type (:type :valist).
+    ;;
+    ;; (:vastart ap)         -- initialize ap to point at the first vararg.
+    ;;                          Effectful; evaluates to 0 (:i32) so it can
+    ;;                          appear in expression position.
+    ;; (:vaarg  ap :type)    -- fetch the next argument of the given (base)
+    ;;                          type from ap.
+    (:vastart (identifier))
+    (:vaarg   (identifier) :type)
 
     (:var      (identifier))
 
@@ -133,9 +139,11 @@
 
     ;; Unified call: callee is either a function name (identifier) or
     ;; an expression of (:fn ...) type (function pointer).
-    ;;   (:call add 1 2)       -- direct named call
-    ;;   (:call (:var fn) 1 2) -- indirect call through a function pointer variable
-    (:call     (option (identifier) :expr) (repeat0 :expr))
+    ;;   (:call add 1 2)                       -- direct named call
+    ;;   (:call (:var fn) 1 2)                 -- indirect through a fn pointer
+    ;;   (:call printf fmt (:varargs) 1 2 3)   -- variadic call; (:varargs)
+    ;;                                            separates named from extra args
+    (:call     (option (identifier) :expr) (repeat0 (option :varargs :expr)))
 
     ;; Take the address of a named function; yields a (:fn ...) typed value.
     (:fn-ptr   (identifier))
@@ -164,7 +172,7 @@
 ;; Format: (:meta (:key1 value1) (:key2 value2) ...)
 ;;   :struct-env  -- alist (name . layout-plist) from pass 2
 ;;   :global-env  -- alist (name . type) from pass 3
-;;   :fn-sigs     -- alist (name . (ret-type . arg-types)) from pass 3
+;;   :fn-sigs     -- alist (name . (ret-type variadic-p . arg-types)) from pass 3
 ;;
 ;; Because :meta is the LAST child, (second module) still returns the first
 ;; real item, preserving backward compatibility with navigation in tests.
@@ -327,6 +335,12 @@
 (def-op *blub-1* (:var name)
   (list :var (lookup-or-error name "read")))
 
+(def-op *blub-1* (:vastart name)
+  (list :vastart (lookup-or-error name "vastart")))
+
+(def-op *blub-1* (:vaarg name type)
+  (list :vaarg (lookup-or-error name "vaarg") type))
+
 (def-op *blub-1* (:block &rest body)
   ;; Fresh dynamic binding initialized from outer scope, so changes don't leak out.
   (let ((*rename-env* *rename-env*))
@@ -341,11 +355,13 @@
            (block (car (last args-and-body)))
            (renamed-args
              (mapcar (lambda (arg)
-                       (destructuring-bind (arg-type arg-name) arg
-                         (let* ((new-name  (register-local arg-name))
-                                (new-pair  (list arg-type new-name)))
-                           (inherit-from new-pair arg)
-                           new-pair)))
+                       (if (eq (car arg) :varargs)
+                         arg     ; (:varargs) marker: pass through unchanged
+                         (destructuring-bind (arg-type arg-name) arg
+                           (let* ((new-name  (register-local arg-name))
+                                  (new-pair  (list arg-type new-name)))
+                             (inherit-from new-pair arg)
+                             new-pair))))
                      args)))
       (list* :function type name (append renamed-args (list (recurse block)))))))
 
@@ -590,6 +606,24 @@
 (def-op *blub-3* (:var name)
   (list :typed (tc-lookup-var-type name) (list :var name)))
 
+(defun tc-check-valist-var (name op)
+  (let ((vt (tc-lookup-var-type name)))
+    (unless (eq (blub-type-inner vt) :valist)
+      (error "typecheck: ~A expects a :valist variable, but ~A has type ~S"
+             op name vt))))
+
+(def-op *blub-3* (:vastart name)
+  ;; vastart is a pure side-effect (statement-only).  We emit it unwrapped so
+  ;; subsequent passes see it at statement position, not as a :typed expr.
+  (tc-check-valist-var name :vastart)
+  (list :vastart name))
+
+(def-op *blub-3* (:vaarg name type)
+  (tc-check-valist-var name :vaarg)
+  (unless (member (blub-type-inner type) '(:i32 :u32 :i64 :u64 :f32 :f64 :pointer))
+    (error "typecheck: :vaarg type must be a base type, got ~S" type))
+  (list :typed type (list :vaarg name type)))
+
 ;; Arithmetic/bitwise binary operators.
 (def-op *blub-3* (:add  l r) (tc-check-binop :add  l r #'tc-numeric-p  "numeric"          #'identity))
 (def-op *blub-3* (:sub  l r) (tc-check-binop :sub  l r #'tc-numeric-p  "numeric"          #'identity))
@@ -640,8 +674,10 @@
   (multiple-value-bind (sig found) (fset:lookup *tc-fn-sigs* name)
     (unless found
       (error "typecheck: :fn-ptr references undeclared function ~A" name))
+    ;; sig is (ret-type variadic-p . arg-types); fn-ptr ignores variadic-p
+    ;; since QBE fn pointer types do not encode variadic-ness.
     (let* ((ret-type  (car sig))
-           (arg-types (cdr sig))
+           (arg-types (cddr sig))
            (fn-type   (list :type (list* :fn ret-type arg-types))))
       (list :typed fn-type (list :fn-ptr name)))))
 
@@ -681,13 +717,27 @@
     (multiple-value-bind (sig found) (fset:lookup *tc-fn-sigs* callee)
       (unless found
         (error "typecheck: call to undeclared function ~A" callee))
-      (let* ((ret-type  (car sig))
-             (arg-types (cdr sig))
-             (n-formal  (length arg-types))
-             (n-actual  (length args)))
-        (unless (= n-formal n-actual)
-          (error "typecheck: ~A expects ~D arg~:P, got ~D" callee n-formal n-actual))
-        (let ((lowered-args
+      (let* ((ret-type   (car sig))
+             (variadic-p (cadr sig))
+             (arg-types  (cddr sig))
+             ;; Split args at the (:varargs) marker if present.
+             (marker     (position-if (lambda (a) (and (consp a) (eq (car a) :varargs)))
+                                      args))
+             (named-args (if marker (subseq args 0 marker) args))
+             (extra-args (if marker (subseq args (1+ marker)) nil))
+             (n-formal   (length arg-types))
+             (n-named    (length named-args)))
+        (cond
+          ((and variadic-p (not marker))
+           (error "typecheck: ~A is variadic; call must include a (:varargs) marker"
+                  callee))
+          ((and (not variadic-p) marker)
+           (error "typecheck: ~A is not variadic; call must not include (:varargs)"
+                  callee))
+          ((not (= n-formal n-named))
+           (error "typecheck: ~A expects ~D named arg~:P, got ~D"
+                  callee n-formal n-named)))
+        (let ((lowered-named
                 (mapcar (lambda (arg formal-type)
                           (let* ((a  (tc-lower-expr arg))
                                  (at (blub-type-of a)))
@@ -695,11 +745,29 @@
                               (error "typecheck: arg to ~A has type ~S, expected ~S"
                                      callee at formal-type))
                             a))
-                        args arg-types)))
-          (list :typed ret-type (list* :call callee lowered-args)))))
+                        named-args arg-types))
+              (lowered-extra
+                (mapcar (lambda (arg)
+                          (let* ((a  (tc-lower-expr arg))
+                                 (at (blub-type-of a)))
+                            (unless (or (null at)
+                                        (member (blub-type-inner at)
+                                                '(:i32 :u32 :i64 :u64 :f32 :f64
+                                                  :pointer :fn)))
+                              (error "typecheck: variadic arg to ~A has type ~S; ~
+                                      only base types are supported" callee at))
+                            a))
+                        extra-args)))
+          (list :typed ret-type
+                (if marker
+                  (list* :call callee
+                         (append lowered-named (list '(:varargs)) lowered-extra))
+                  (list* :call callee lowered-named))))))
     ;; Indirect call: callee is an expression; must have (:fn ...) type.
     (let* ((ce          (tc-lower-expr callee))
            (ct          (blub-type-of ce)))
+      (when (find-if (lambda (a) (and (consp a) (eq (car a) :varargs))) args)
+        (error "typecheck: (:varargs) marker not supported in indirect calls"))
       (unless (eq (blub-type-inner ct) :fn)
         (error "typecheck: indirect :call callee has type ~S, expected a (:fn ...) type" ct))
       (let* ((fn-inner  (cadr ct))           ; (:fn ret-type param-type...)
@@ -814,9 +882,11 @@
          (*tc-var-type-env* (fset:empty-map))
          (*tc-return-type*  ret-type))
     ;; Register parameter types before recursing the body.
+    ;; The trailing (:varargs) marker, if any, contributes no name binding.
     (dolist (arg args)
-      (destructuring-bind (arg-type arg-name) arg
-        (setf *tc-var-type-env* (fset:with *tc-var-type-env* arg-name arg-type))))
+      (unless (eq (car arg) :varargs)
+        (destructuring-bind (arg-type arg-name) arg
+          (setf *tc-var-type-env* (fset:with *tc-var-type-env* arg-name arg-type)))))
     (list* :function ret-type name (append args (list (recurse body))))))
 
 (def-op *blub-3* (:defstruct name size align &rest fields)
@@ -868,14 +938,18 @@
             (declare (ignore kw val))
             (setf *tc-global-type-env* (fset:with *tc-global-type-env* gname type)))))
       ;; Pre-scan function signatures (always needed: mutual recursion).
+      ;; Sig is (ret-type variadic-p . arg-types); the (:varargs) marker, if
+      ;; any, must be the last formal and only sets variadic-p.
       (dolist (decl items)
         (when (and (consp decl) (eq (car decl) :function))
-          (let* ((fn-ret  (second decl))
-                 (fn-name (third decl))
-                 (fn-args (butlast (cdddr decl))))
+          (let* ((fn-ret    (second decl))
+                 (fn-name   (third decl))
+                 (fn-args   (butlast (cdddr decl)))
+                 (variadic-p (and fn-args (eq (car (car (last fn-args))) :varargs)))
+                 (named-args (if variadic-p (butlast fn-args) fn-args)))
             (setf *tc-fn-sigs*
                   (fset:with *tc-fn-sigs* fn-name
-                             (cons fn-ret (mapcar #'car fn-args)))))))
+                             (list* fn-ret variadic-p (mapcar #'car named-args)))))))
       ;; Phase 2: typecheck every declaration, then store all envs in :meta.
       (let* ((processed (mapcar #'recurse items))
              (new-meta  (meta-set
@@ -979,11 +1053,19 @@
     ((and (consp inner) (eq (car inner) :.))
      (list :. (p4-atomize (cadr inner)) (caddr inner) (cadddr inner)))
     ;; Calls: symbol callee → atomize args only; expression callee → atomize callee too.
+    ;; The (:varargs) marker, if present among args, passes through unchanged.
     ((and (consp inner) (eq (car inner) :call))
-     (let ((callee (cadr inner)))
+     (let* ((callee (cadr inner))
+            (args   (cddr inner))
+            (atom-arg (lambda (a)
+                        (if (and (consp a) (eq (car a) :varargs)) a (p4-atomize a)))))
        (if (symbolp callee)
-         (list* :call callee (mapcar #'p4-atomize (cddr inner)))
-         (list* :call (p4-atomize callee) (mapcar #'p4-atomize (cddr inner))))))
+         (list* :call callee (mapcar atom-arg args))
+         (list* :call (p4-atomize callee) (mapcar atom-arg args)))))
+    ;; vaarg is already atomic (just a load from the va_list); pass through.
+    ;; vastart has no operands aside from its identifier; pass through.
+    ((and (consp inner) (or (eq (car inner) :vaarg) (eq (car inner) :vastart)))
+     inner)
     ;; Default: pass through.
     (t inner)))
 
@@ -1034,6 +1116,10 @@
         (p4-emit-stmt (list :set
                             (list dot (p4-atomize struct-expr) field-name offset field-type)
                             (p4-simplify value)))))))
+
+(def-op *blub-4* (:vastart name)
+  ;; Pass-through; pass 5 emits the vastart instruction.
+  (list :vastart name))
 
 (def-op *blub-4* (:return &optional value)
   (if value
@@ -1142,6 +1228,7 @@
   (case (blub-type-inner type)
     ((:u8 :i8 :u32 :i32 :f32) :alloc4)
     ((:u64 :i64 :f64 :pointer :fn)                :alloc8)
+    (:valist :alloc8)
     (:struct
      (let* ((layout (nth-value 0 (fset:lookup struct-env (blub-struct-name type))))
             (align  (getf layout :align)))
@@ -1156,6 +1243,9 @@
   (case (blub-type-inner type)
     ((:u8 :i8 :u32 :i32 :f32) 4)
     ((:u64 :i64 :f64 :pointer :fn)                8)
+    ;; QBE valist size varies by target: 8 (amd64_win, rv64), 24 (amd64_sysv),
+    ;; 32 (arm64). 32 is the conservative maximum across all supported targets.
+    (:valist 32)
     (:struct
      (getf (nth-value 0 (fset:lookup struct-env (blub-struct-name type))) :size))
     (t (error "blub-type->alloc-size: cannot size type ~S" type))))
@@ -1416,10 +1506,17 @@
                      (list :global (b5-global-name callee))
                      (b5-lower callee)))
          (qbe-args (mapcar (lambda (arg)
-                             (let ((arg-type (or (blub-type-of arg) '(:type :i32))))
-                               (list :call-arg
-                                     (blub-type->qbe-abity arg-type)
-                                     (b5-lower arg))))
+                             (cond
+                               ;; (:varargs) separator marker — pass-3 keeps it
+                               ;; verbatim through the arg list.
+                               ((and (consp arg) (eq (car arg) :varargs))
+                                (list :call-arg :... nil))
+                               (t
+                                (let ((arg-type (or (blub-type-of arg)
+                                                    '(:type :i32))))
+                                  (list :call-arg
+                                        (blub-type->qbe-abity arg-type)
+                                        (b5-lower arg))))))
                            args)))
     (if qbe-ret
       (let ((res (b5-temp "call")))
@@ -1625,6 +1722,22 @@
   ;; Address of a named function: the global symbol IS the pointer.
   (list :global (b5-global-name name)))
 
+(def-op *blub-5* (:vastart name)
+  ;; Statement-only: initialize the valist buffer addressed by NAME.
+  (multiple-value-bind (addr type) (b5-lookup-var name)
+    (declare (ignore type))
+    (b5-emit (list :instr :vastart addr)))
+  nil)
+
+(def-op *blub-5* (:vaarg name type)
+  ;; Expression: fetch the next vararg of base TYPE from the valist NAME.
+  (multiple-value-bind (addr vtype) (b5-lookup-var name)
+    (declare (ignore vtype))
+    (let* ((qbase (blub-type->qbe-base type))
+           (res   (b5-temp "va")))
+      (b5-emit (list :assign (b5-wrap-temp res) qbase :vaarg addr))
+      (b5-wrap-temp res))))
+
 (def-op *blub-5* (:addr-of inner)
   ;; Address of a variable: return the stack pointer directly without loading.
   ;; The inner form may be :typed-wrapped after pass 3.
@@ -1819,7 +1932,10 @@
     (b5-new-block start-lbl)
     (let ((qbe-params
             (mapcar (lambda (arg)
-                      (destructuring-bind (arg-type arg-name) arg
+                      (if (eq (car arg) :varargs)
+                        ;; Variadic marker: QBE encodes this as `(:param :... nil)`.
+                        (list :param :... nil)
+                        (destructuring-bind (arg-type arg-name) arg
                         (let* ((in-tmp  (b5-temp (string arg-name)))
                                (qabity  (blub-type->qbe-abity arg-type))
                                (struct-p (eq (blub-type-inner arg-type) :struct)))
@@ -1851,7 +1967,7 @@
                                               (b5-wrap-temp ptr-tmp)))
                                (setf *b5-var-env*  (fset:with *b5-var-env*  arg-name (b5-wrap-temp ptr-tmp)))
                                (setf *b5-type-env* (fset:with *b5-type-env* arg-name arg-type))
-                               (list :param qbase (b5-wrap-temp in-tmp))))))))
+                               (list :param qbase (b5-wrap-temp in-tmp)))))))))
                     args)))
       (recurse body)
       (unless *b5-terminated*
