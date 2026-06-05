@@ -354,7 +354,6 @@ _qbe_main:
 
 Next, I wanted to implement more of a C-like language which could be translated, rather straightforwardly, to my QBE language.
 To do this, I implemented the following compiler passes:
-0. Desugaring
 1. Variable renaming (uniquify)
 2. Struct layout resolution (computing struct field offsets)
 3. Typechecking
@@ -494,7 +493,6 @@ Furthermore, Scheme primitives can be trivially mapped to C functions which perf
 Rather, the main challenge was closure conversion and flattening the structure of the code (everything else could be mapped roughly 1-to-1).
 
 Compiler Passes:
-0. Desugaring
 1. Rename variables (uniquify)
 2. Box variables (convert assignments)
 3. Convert closures
@@ -513,6 +511,15 @@ Excluding helper functions, the translation process looks something like:
       (:mul (:add 2 3) 5))))
 
 =>
+
+(:EXTERN (:TYPE :U64) _SCHEME_PANIC)
+
+(:FUNCTION (:TYPE :U64) _ADD ((:TYPE :U64) A) ((:TYPE :U64) B)
+  (:BLOCK
+    (:IF (:OR (:AND (:VAR A) 15) (:AND (:VAR B) 15))
+      (:BLOCK
+        (:DECLARE (:TYPE :U64) _ (:CALL _SCHEME_PANIC))))
+    (:RETURN (:SHL (:ADD (:SHR (:VAR A) 4) (:SHR (:VAR B) 4)) 4))))
 
 (:FUNCTION (:TYPE :U64) #:|lambda_884|
   ((:TYPE :U64) #:|closure_885|)
