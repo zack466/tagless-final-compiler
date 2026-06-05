@@ -238,3 +238,8 @@ TODO:
 # 5/27/26
 - TODO: could be useful to have a simple parser for each language (since sexps aren't the easiest to write)
   - and can also have formatted output "as" each language
+
+# 6/5/26
+- fixed bugs in blub
+- finished Scheme language and added tests
+- write up final report

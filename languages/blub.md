@@ -25,16 +25,24 @@ The grammar can be written in our custom grammar language as:
 ```lisp
 (defparameter *blub-grammar*
   '((:module
-     (repeat0 (option :function :global :block :defstruct)))
+     (repeat0 (option :function :extern :global :block :defstruct)))
+
+    ;; An extern declares a C-linkage function so blub can call it without
+    ;; emitting a definition. Like :function but with no body.
+    (:extern
+     :type (identifier) (repeat0 (option (list :type (identifier)) :varargs)))
 
     (:defstruct
       (identifier) (repeat0 (list :type (identifier))))
 
+    ;; A function may end its parameter list with a (:varargs) marker to
+    ;; indicate it is variadic.
     (:function
-     :type (identifier) :args :block)
+     :type (identifier)
+     (repeat0 (option (list :type (identifier)) :varargs))
+     :block)
 
-    (:args
-     (repeat0 (list :type (identifier))))
+    (:varargs)
 
     (:block
      (repeat0 :statement))
@@ -48,7 +56,8 @@ The grammar can be written in our custom grammar language as:
                        :while
                        :return
                        :break
-                       :continue)))
+                       :continue
+                       )))
 
     (:declare
      :type (identifier) (maybe :expr))
@@ -76,6 +85,8 @@ The grammar can be written in our custom grammar language as:
       (keyword :u32)  (keyword :i32)
       (keyword :u64)  (keyword :i64)
       (keyword :f32)  (keyword :f64)
+      ;; Variadic-argument list buffer; sized to fit any QBE target.
+      (keyword :valist)
       :pointer :struct :fn))
 
     (:pointer :type)
@@ -97,7 +108,7 @@ The grammar can be written in our custom grammar language as:
        ;; Unary
        :neg :not :deref :addr-of
        ;; Bitwise / arithmetic binary
-       :add :sub :mul :div :and :or :xor
+       :add :sub :mul :div :and :or :xor :shl :shr
        ;; Comparison
        :eq :ne :lt :le :gt :ge
        ;; Logical
@@ -107,7 +118,20 @@ The grammar can be written in our custom grammar language as:
        ;; Take the address of a named function (yields a (:fn ...) typed value).
        :fn-ptr
        ;; Explicit type cast (like C casting).
-       :cast)))
+       :cast
+       ;; variadic argument
+       :vaarg :vastart
+       )))
+
+    ;; Variadic arguments.  AP must name a local of type (:type :valist).
+    ;;
+    ;; (:vastart ap)         -- initialize ap to point at the first vararg.
+    ;;                          Effectful; evaluates to 0 (:i32) so it can
+    ;;                          appear in expression position.
+    ;; (:vaarg  ap :type)    -- fetch the next argument of the given (base)
+    ;;                          type from ap.
+    (:vastart (identifier))
+    (:vaarg   (identifier) :type)
 
     (:var      (identifier))
 
@@ -125,6 +149,8 @@ The grammar can be written in our custom grammar language as:
     (:and      :expr :expr)
     (:or       :expr :expr)
     (:xor      :expr :expr)
+    (:shl      :expr :expr)
+    (:shr      :expr :expr)
 
     ;; Comparisons.
     (:eq       :expr :expr)
@@ -140,9 +166,11 @@ The grammar can be written in our custom grammar language as:
 
     ;; Unified call: callee is either a function name (identifier) or
     ;; an expression of (:fn ...) type (function pointer).
-    ;;   (:call add 1 2)       -- direct named call
-    ;;   (:call (:var fn) 1 2) -- indirect call through a function pointer variable
-    (:call     (option (identifier) :expr) (repeat0 :expr))
+    ;;   (:call add 1 2)                       -- direct named call
+    ;;   (:call (:var fn) 1 2)                 -- indirect through a fn pointer
+    ;;   (:call printf fmt (:varargs) 1 2 3)   -- variadic call; (:varargs)
+    ;;                                            separates named from extra args
+    (:call     (option (identifier) :expr) (repeat0 (option :varargs :expr)))
 
     ;; Take the address of a named function; yields a (:fn ...) typed value.
     (:fn-ptr   (identifier))
@@ -186,7 +214,9 @@ int factorial(int j) {
 
 ## Interpreters
 
-;; Compiler passes (in no particular order)
-;; - typecheck standard operators, function calls, pointers, etc
-;; - resolve all struct definitions, determine total size, plus size and offset of each field
-;; - cps transformation from nested statements into SSA
+0. Desugaring
+1. Variable renaming (uniquify)
+2. Struct layout resolution (computing struct field offsets)
+3. Typechecking
+4. Remove complex operands (convert nested expressions to three-address code)
+5. Lower to QBE (mostly a 1-to-1 translation)
