@@ -196,7 +196,7 @@
    (fresh-name \"loop-end\")  => #:loop-end3
    The returned symbol is EQ-comparable to itself and to other references
    to the same call, but distinct from every other fresh symbol."
-  (make-symbol (format nil "~A~D"
+  (make-symbol (format nil "~A_~D"  ; Added a hyphen delimiter
                        (string prefix)
                        (incf *fresh-counter*))))
 
@@ -300,9 +300,12 @@
   (let ((op (first expr)))
     (cond
       ((not (keywordp op))
-       (error "~A: Interpreter expects keyword operators, got ~A"
-              (severity-color :error "Error")
-              (lisp-to-string op)))
+       ;; Just recurse on each element in the list
+       (mapcar (lambda (arg) (lower interp arg)) expr)
+       ; (error "~A: Interpreter expects keyword operators, got ~A"
+       ;        (severity-color :error "Error")
+       ;        (lisp-to-string op))
+       )
       (t
        (call-with-trace-frame
         interp expr
@@ -438,7 +441,8 @@
     `(let* ((,root (list nil))
             (*trace-stack* (list ,root))
             (,val (progn ,@body)))
-       (print-trace (nreverse (car ,root))))))
+       (print-trace (nreverse (car ,root)))
+       (values ,val (nreverse (car ,root))))))
 
 (defun print-trace (trace &key (stream *standard-output*) (indent 0)
                                (show-locations t))
@@ -543,10 +547,10 @@
            ,@(when all-vars `((declare (ignorable ,@all-vars))))
            (flet ((recurse (x) (lower ,interp x))
                   (recurse-splice (x) (lower ,interp x :splice t))
-                  (expr () ,expr)
+                  (this () ,expr)
                   (inherit-from (target source) (inherit-loc target source)))
              (declare (ignorable #'recurse #'recurse-splice
-                                 #'expr #'inherit-from))
+                                 #'this #'inherit-from))
              ,@body))))))
 
 ;; --- Local rule overrides ---

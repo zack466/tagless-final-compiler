@@ -23,7 +23,8 @@
                        :while
                        :return
                        :break
-                       :continue)))
+                       :continue
+                       )))
 
     (:declare
      :type (identifier) (maybe :expr))
@@ -82,7 +83,22 @@
        ;; Take the address of a named function (yields a (:fn ...) typed value).
        :fn-ptr
        ;; Explicit type cast (like C casting).
-       :cast)))
+       :cast
+       ;; variadic argument
+       :vaarg :vastart
+       )))
+
+    ;; variadic arguments
+    ;; TODO: implement
+
+    ;; equivalent to:
+    ;;   va_list ap;
+    ;;   va_start(ap, count);
+    (:vastart :expr)
+
+    ;; equivalent to:
+    ;;   va_arg(ap, count);
+    (:vaarg (identifier) :type)
 
     (:var      (identifier))
 
@@ -93,6 +109,7 @@
     (:addr-of  :expr)
 
     ;; Binary arithmetic / bitwise.
+    ;;TODO: implement shl, shr
     (:add      :expr :expr)
     (:sub      :expr :expr)
     (:mul      :expr :expr)
@@ -100,6 +117,8 @@
     (:and      :expr :expr)
     (:or       :expr :expr)
     (:xor      :expr :expr)
+    (:shl      :expr :expr)
+    (:shr      :expr :expr)
 
     ;; Comparisons.
     (:eq       :expr :expr)
