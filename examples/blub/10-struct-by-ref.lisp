@@ -30,8 +30,8 @@
   (:function (:type :i32) sum-fields
     ((:type (:pointer (:type (:struct point)))) p)
     (:block
-      (:return (:add (:. (:deref (:var p)) x)
-                     (:. (:deref (:var p)) y)))))
+      (:return (:add (:-> (:var p) x)
+                     (:-> (:var p) y)))))
 
   (:function (:type :i32) qbe_main
     (:block

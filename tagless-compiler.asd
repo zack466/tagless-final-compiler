@@ -21,7 +21,8 @@
                              (:file "interpreter")
                              (:file "example")
                              (:file "qbe")
-                             (:file "blub")))))
+                             (:file "blub")
+                             (:file "scheme")))))
 
 (asdf:defsystem #:tagless-compiler/tests
   :depends-on (#:tagless-compiler)
@@ -35,4 +36,5 @@
                              (:file "test-context")
                              (:file "test-propagation")
                              (:file "test-match")
-                             (:file "test-blub-passes")))))
+                             (:file "test-blub-passes")
+                             (:file "test-scheme-passes")))))

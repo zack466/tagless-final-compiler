@@ -199,6 +199,9 @@
 (defparameter *scheme-0* (make-interpreter :on-unknown :recurse
                                            :readable-name "SCHEME-0"))
 
+(defparameter *scheme-globals* (fset:empty-set)
+  "Set of global variables defined at the module level.")
+
 ;; Pass 1: uniquify
 (defparameter *scheme-1* (make-interpreter :on-unknown :recurse
                                            :readable-name "SCHEME-1"))
@@ -229,10 +232,13 @@
 
 (def-op *scheme-1* (:module &rest body)
   (let ((*s1-rename-env* (fset:empty-map)))
+    ;; Pre-register all globals to support mutual recursion and out-of-order references
+    (dolist (form body)
+      (when (and (consp form) (eq (car form) :define))
+        (s1-register-global (second form))))
     (append (list :module) (mapcan #'recurse-splice body))))
 
 (def-op *scheme-1* (:define name form)
-  (s1-register-global name)
   (list :define name (recurse form)))
 
 (def-op *scheme-1* (:let bindings &rest body)
@@ -281,7 +287,8 @@
     (append (list :lambda params) (mapappend #'recurse-splice body))))
 
 (def-op *scheme-2a* (:set! var form)
-  (when (not (fset:contains? *s2a-captured-vars* var))
+  (when (and (not (fset:contains? *s2a-captured-vars* var))
+             (not (fset:contains? *scheme-globals* var)))
     (setf *s2a-vars-to-box* (fset:with *s2a-vars-to-box* var)))
   (list :set! var (recurse form)))
 
@@ -405,7 +412,8 @@
 (def-op *scheme-3a* (:lambda params &rest body)
   (let ((pset (fset:convert 'fset:set params)))
     (multiple-value-bind (body* body-free) (s3a-walk-body body #'recurse-splice)
-      (let ((free (fset:set-difference body-free pset)))
+      (let* ((free (fset:set-difference body-free pset))
+             (free (fset:set-difference free *scheme-globals*)))
         ;; this lambda's free vars are free in the enclosing scope too
         (setf *s3a-free* (fset:union *s3a-free* free))
         (append (list :lambda params (fset:convert 'list free)) body*)))))
@@ -461,8 +469,11 @@
          (fn (s3a-construct-lambda fn-name params free-vars body*)))
     ;; construct top-level function AST
     (setf *s3a-lambdas* (fset:with *s3a-lambdas* fn-name fn))
-    ;; return make-closure call
-    (append (list :make-closure (list :fn-ptr fn-name) (length free-vars))
+    ;; return make-closure call. The fn-ptr is cast to :u64 so the runtime
+    ;; helper can accept a uniform u64 first argument.
+    (append (list :make-closure
+                  (list :cast '(:type :u64) (list :fn-ptr fn-name))
+                  (length free-vars))
             (loop for fv in free-vars collect (list :var fv)))))
 
 
@@ -585,11 +596,6 @@
 ;;   (let ((x z) (y 2))
 ;;   ...body))
 ;;  )
-
-(def-op *scheme-5* (:let bindings &rest body)
-  (let* ((declares (loop for (hd tl) in bindings
-                         collect (list :declare (:type :u64) hd tl)))
-    ))
 
 ;; ============================================================
 ;; Pass 5: explicate control (normalize :let and :if)
@@ -737,8 +743,19 @@
 ;; --- expression world: value form -> blub expr ---
 
 (def-op *scheme-6e* (:apply fn &rest args)
-  ;; (:apply f a b) -> (:call apply f a b): call the runtime apply() helper
-  (list* :call 'apply (recurse fn) (mapcar #'recurse args)))
+  ;; Inline the closure call: every scheme value is :u64 and every compiled
+  ;; lambda has signature (env: u64, arg1: u64, ..., argN: u64) -> u64.
+  ;; Extract the function pointer and closure base from FN, cast to the right
+  ;; fn-type, and dispatch directly. FN is atomic post pass 4 (a :var), so
+  ;; it is safe to evaluate twice.
+  (let* ((fn-val (recurse fn))
+         (args*  (mapcar #'recurse args))
+         (n+1    (1+ (length args)))
+         (params (loop repeat n+1 collect '(:type :u64)))
+         (fn-type `(:type (:fn (:type :u64) ,@params))))
+    `(:call (:cast ,fn-type (:call _closure_fn ,fn-val))
+            (:call _closure_env ,fn-val)
+            ,@args*)))
 
 ;; :var, :deref, :add, :<, :make-closure, :make-ref, literals, etc. ride
 ;; the :recurse policy -- they rebuild with operands lowered, which is
@@ -898,8 +915,12 @@
   "Scheme primitive operators that lower to builtin calls.")
 
 (defun s6b-builtin-name (keyword)
-  "Map a primitive KEYWORD to its builtin function symbol: :add -> _add."
-  (intern (format nil "_~A" (string-downcase (symbol-name keyword)))))
+  "Map a primitive KEYWORD to its builtin function symbol:
+   :add -> _ADD, :make-closure -> _MAKE_CLOSURE.
+   Preserves uppercase and converts hyphens to underscores so the generated
+   symbol matches the names used in *scheme-runtime*."
+  (intern (format nil "_~A"
+                  (substitute #\_ #\- (symbol-name keyword)))))
 
 (defmacro def-s6b-prim (keyword)
   "Define a 6b handler turning (KEYWORD . operands) into
@@ -912,9 +933,24 @@
 (macrolet ((gen () `(progn ,@(mapcar (lambda (k) `(def-s6b-prim ,k))
                                      '(:neg :not :add :sub :mul :div
                                        :and :or :xor :eq :ne :lt :le
-                                       :gt :ge :cons :car :cdr :free-var
-                                       :make-closure :make-ref :deref)))))
+                                       :gt :ge :cons :car :cdr
+                                       :make-ref :deref)))))
   (gen))
+
+(def-op *scheme-6b* (:free-var idx closure)
+  (list :call (s6b-builtin-name :free-var)
+        (list :cast '(:type :u64) (recurse idx))
+        (recurse closure)))
+
+;; :make-closure is special: the runtime helper is variadic in the free-var
+;; values, so the call site must include a (:varargs) marker between the
+;; (fn, count) prefix and the free-var args.
+(def-op *scheme-6b* (:make-closure fn n &rest free-vars)
+  (list* :call (s6b-builtin-name :make-closure)
+         (recurse fn)
+         (list :cast '(:type :u64) (recurse n))
+         '(:varargs)
+         (mapcar #'recurse free-vars)))
 
 
 (pp-blub (lower-passes
@@ -933,24 +969,421 @@
 (defparameter *scheme-to-blub* (make-interpreter :on-unknown :recurse
                                                  :readable-name "SCHEME->BLUB"))
 
-;; Define blub functions used by our scheme
-(defparameter *scheme-prelude*
-  (list '(:function (:type :i32) fib
-                    ((:type :i32) n)
-                    (:block
-                      (:declare (:type :i32) a 0)
-                      (:declare (:type :i32) b 1)
-                      (:declare (:type :i32) i 0)
-                      (:declare (:type :i32) tmp 0)
-                      (:while (:lt (:var i) (:var n))
-                              (:block
-                                (:set tmp (:var b))
-                                (:set b   (:add (:var a) (:var b)))
-                                (:set a   (:var tmp))
-                                (:set i   (:add (:var i) 1))))
-                      (:return (:var a))))))
+;; ============================================================
+;; Scheme runtime (written in blub)
+;; ============================================================
+;; Every scheme value is a u64. The low 4 bits encode a type tag and the
+;; remaining bits hold either a shifted integer or an aligned heap pointer
+;; (malloc returns 16-byte-aligned, so the low 4 bits start zero).
+;;
+;;   TAG_INT  = 0   value     = (n << 4) | 0
+;;   TAG_PAIR = 1   value     = ptr | 1   ; ptr -> [u64 car, u64 cdr]
+;;   TAG_CLOS = 2   value     = ptr | 2   ; ptr -> [u64 fn, u64 free0, ...]
+;;   TAG_REF  = 3   value     = ptr | 3   ; ptr -> [u64 cell]
+;;
+;; Integer literals are pre-shifted at compile time by SCHEME-BOX-LITERALS,
+;; so the runtime never has to box them. Each primitive checks its operand
+;; tags before doing work; on mismatch it calls _scheme_panic which aborts.
 
-;; Just add in prelude
+(defparameter *scheme-runtime*
+  '(
+    ;; C-runtime entry points.
+    (:extern (:type :u64)  _scheme_alloc ((:type :u64) bytes))
+    (:extern (:type :u64)  _scheme_panic)
+
+    ;; ---- type-tag checks ----
+    ;; Each binop primitive begins (:if (:or (tagbits a) (tagbits b)) panic).
+    ;; tagbits = (:and v 15); non-zero means tag != TAG_INT.
+
+    ;; ---- arithmetic / bitwise (ints only) ----
+
+    (:function (:type :u64) _add ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:add (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _sub ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:sub (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _mul ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:mul (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _div ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:div (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _and ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:and (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _or ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:or (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _xor ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:xor (:shr (:var a) 4) (:shr (:var b) 4)) 4))))
+
+    (:function (:type :u64) _neg ((:type :u64) a)
+      (:block
+        (:if (:and (:var a) 15)
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:neg (:shr (:var a) 4)) 4))))
+
+    (:function (:type :u64) _not ((:type :u64) a)
+      (:block
+        (:if (:and (:var a) 15)
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:not (:shr (:var a) 4)) 4))))
+
+    ;; ---- comparisons (return boxed 0/1) ----
+
+    (:function (:type :u64) _eq ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:cast (:type :u64) (:eq (:var a) (:var b))) 4))))
+
+    (:function (:type :u64) _ne ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:cast (:type :u64) (:ne (:var a) (:var b))) 4))))
+
+    (:function (:type :u64) _lt ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:cast (:type :u64) (:lt (:shr (:var a) 4) (:shr (:var b) 4))) 4))))
+
+    (:function (:type :u64) _le ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:cast (:type :u64) (:le (:shr (:var a) 4) (:shr (:var b) 4))) 4))))
+
+    (:function (:type :u64) _gt ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:cast (:type :u64) (:gt (:shr (:var a) 4) (:shr (:var b) 4))) 4))))
+
+    (:function (:type :u64) _ge ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:if (:or (:and (:var a) 15) (:and (:var b) 15))
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:return (:shl (:cast (:type :u64) (:ge (:shr (:var a) 4) (:shr (:var b) 4))) 4))))
+
+    ;; ---- pairs ----
+
+    (:function (:type :u64) _cons ((:type :u64) a) ((:type :u64) b)
+      (:block
+        (:declare (:type :u64) raw (:call _scheme_alloc 16))
+        (:declare (:type (:pointer (:type :u64))) p0
+                  (:cast (:type (:pointer (:type :u64))) (:var raw)))
+        (:set (:deref (:var p0)) (:var a))
+        (:declare (:type (:pointer (:type :u64))) p1
+                  (:cast (:type (:pointer (:type :u64))) (:add (:var raw) 8)))
+        (:set (:deref (:var p1)) (:var b))
+        (:return (:or (:var raw) 1))))
+
+    (:function (:type :u64) _car ((:type :u64) v)
+      (:block
+        (:if (:ne (:and (:var v) 15) 1)
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:declare (:type (:pointer (:type :u64))) p
+                  (:cast (:type (:pointer (:type :u64))) (:sub (:var v) 1)))
+        (:return (:deref (:var p)))))
+
+    (:function (:type :u64) _cdr ((:type :u64) v)
+      (:block
+        (:if (:ne (:and (:var v) 15) 1)
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:declare (:type (:pointer (:type :u64))) p
+                  (:cast (:type (:pointer (:type :u64))) (:add (:sub (:var v) 1) 8)))
+        (:return (:deref (:var p)))))
+
+    ;; ---- refs (single-cell boxes) ----
+
+    (:function (:type :u64) _make_ref ((:type :u64) v)
+      (:block
+        (:declare (:type :u64) raw (:call _scheme_alloc 8))
+        (:declare (:type (:pointer (:type :u64))) p
+                  (:cast (:type (:pointer (:type :u64))) (:var raw)))
+        (:set (:deref (:var p)) (:var v))
+        (:return (:or (:var raw) 3))))
+
+    (:function (:type :u64) _deref ((:type :u64) v)
+      (:block
+        (:if (:ne (:and (:var v) 15) 3)
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:declare (:type (:pointer (:type :u64))) p
+                  (:cast (:type (:pointer (:type :u64))) (:sub (:var v) 3)))
+        (:return (:deref (:var p)))))
+
+    ;; ---- closures ----
+    ;; layout: [u64 fn, u64 free0, u64 free1, ...].
+    ;; _make_closure(fn, n, ...vals) — variadic in n free vars.
+
+    (:function (:type :u64) _make_closure ((:type :u64) fn) ((:type :u64) n) (:varargs)
+      (:block
+        (:declare (:type :valist) ap)
+        (:vastart ap)
+        (:declare (:type :u64) sz  (:add 8 (:shl (:var n) 3)))
+        (:declare (:type :u64) raw (:call _scheme_alloc (:var sz)))
+        (:declare (:type (:pointer (:type :u64))) p0
+                  (:cast (:type (:pointer (:type :u64))) (:var raw)))
+        (:set (:deref (:var p0)) (:var fn))
+        (:declare (:type :u64) i 0)
+        (:while (:lt (:var i) (:var n))
+          (:block
+            (:declare (:type :u64) v (:vaarg ap (:type :u64)))
+            (:declare (:type :u64) offset (:add 8 (:shl (:var i) 3)))
+            (:declare (:type (:pointer (:type :u64))) slot
+                      (:cast (:type (:pointer (:type :u64))) (:add (:var raw) (:var offset))))
+            (:set (:deref (:var slot)) (:var v))
+            (:set i (:add (:var i) 1))))
+        (:return (:or (:var raw) 2))))
+
+    (:function (:type :u64) _free_var ((:type :u64) i) ((:type :u64) closure)
+      (:block
+        (:declare (:type :u64) offset (:add 8 (:shl (:var i) 3)))
+        (:declare (:type (:pointer (:type :u64))) slot
+                  (:cast (:type (:pointer (:type :u64)))
+                         (:add (:var closure) (:var offset))))
+        (:return (:deref (:var slot)))))
+
+    ;; _closure_fn(v) -> raw function pointer at closure[0].
+    (:function (:type :u64) _closure_fn ((:type :u64) v)
+      (:block
+        (:if (:ne (:and (:var v) 15) 2)
+          (:block (:declare (:type :u64) _ (:call _scheme_panic))))
+        (:declare (:type (:pointer (:type :u64))) p
+                  (:cast (:type (:pointer (:type :u64))) (:sub (:var v) 2)))
+        (:return (:deref (:var p)))))
+
+    ;; _closure_env(v) -> untagged closure pointer (passed as the env arg).
+    (:function (:type :u64) _closure_env ((:type :u64) v)
+      (:block
+        (:return (:sub (:var v) 2))))))
+
+;; ============================================================
+;; Literal boxing
+;; ============================================================
+;; SCHEME-BOX-LITERALS pre-shifts every integer literal in the source AST so
+;; that user code does not have to call a _box_int helper at runtime. Runs
+;; before any compiler-introduced integers (closure free-var counts/indices,
+;; etc.) appear in the tree, so those stay raw.
+
+(defun scheme-box-literals (ast)
+  (cond
+    ((integerp ast) (ash ast 4))
+    ((consp ast)    (mapcar #'scheme-box-literals ast))
+    (t              ast)))
+
+;; ============================================================
+;; scheme -> blub driver
+;; ============================================================
+;; Splits each global initializer into a zero-initialized data slot plus a
+;; statement in _scheme_init_globals.  Adds a qbe_main driver that calls
+;; _scheme_init_globals and then applies a closure named scheme `main` (if
+;; present).  The scheme symbol `main` is renamed to `_scheme_main` to avoid
+;; colliding with the C-driver's int main().
+
+(defun split-scheme-global (g)
+  "Return (zero-init-global . init-stmt-or-nil)."
+  (destructuring-bind (kw type name &optional init) g
+    (cond
+      ((or (null init) (numberp init))
+       (cons g nil))
+      (t
+       (cons (list kw type name 0)
+             (list :set name init))))))
+
+(defun rename-scheme-main (form)
+  "Walk FORM replacing the scheme symbol main with _scheme_main everywhere."
+  (cond
+    ((eq form 'main) '_scheme_main)
+    ((consp form)    (mapcar #'rename-scheme-main form))
+    (t               form)))
+
+(defun scheme-has-main-p (body)
+  (some (lambda (n)
+          (and (consp n) (eq (car n) :global) (eq (third n) '_scheme_main)))
+        body))
+
+(defun scheme-driver ()
+  "Blub form for qbe_main: init globals, apply (main), unbox return."
+  '(:function (:type :i32) qbe_main
+     (:block
+       (:declare (:type :u64) _init (:call _scheme_init_globals))
+       (:declare (:type :u64) m (:var _scheme_main))
+       (:declare (:type :u64) fnp (:call _closure_fn (:var m)))
+       (:declare (:type :u64) env (:call _closure_env (:var m)))
+       (:declare (:type :u64) r
+                 (:call (:cast (:type (:fn (:type :u64) (:type :u64)))
+                               (:var fnp))
+                        (:var env)))
+       (:return (:cast (:type :i32) (:shr (:var r) 4))))))
+
 (def-op *scheme-to-blub* (:module &rest body)
-  `(:module ,@*scheme-prelude*
-            ,@(mapcan #'recurse-splice body)))
+  (let* ((body*   (mapcan #'recurse-splice body))
+         (body*   (rename-scheme-main body*))
+         (globals (remove-if-not (lambda (n) (and (consp n) (eq (car n) :global)))
+                                 body*))
+         (rest    (remove-if (lambda (n) (and (consp n) (eq (car n) :global)))
+                             body*))
+         (split        (mapcar #'split-scheme-global globals))
+         (zero-globals (mapcar #'car split))
+         (init-stmts   (remove nil (mapcar #'cdr split)))
+         (init-fn      `(:function (:type :u64) _scheme_init_globals
+                          (:block ,@init-stmts (:return 0))))
+         (driver       (when (scheme-has-main-p zero-globals)
+                         (list (scheme-driver)))))
+    `(:module
+      ,@*scheme-runtime*
+      ,@rest
+      ,@zero-globals
+      ,init-fn
+      ,@driver)))
+
+;; ============================================================
+;; Pipeline orchestrator
+;; ============================================================
+
+(defun sanitize-symbol-name (sym)
+  "Sanitize a symbol by replacing any invalid QBE characters (like hyphens) with underscores."
+  (if (and sym (symbolp sym))
+      (if (eq (symbol-package sym) (find-package :keyword))
+          sym
+          (let* ((name (symbol-name sym))
+                 (first-char (char name 0))
+                 (sanitized (map 'string
+                                 (lambda (c)
+                                   (if (or (alphanumericp c) (char= c #\_))
+                                       c
+                                       #\_))
+                                 name)))
+            ;; QBE symbols/temporaries cannot start with a digit.
+            ;; If it starts with a digit, prepend an underscore.
+            (if (digit-char-p first-char)
+                (setf sanitized (format nil "_~A" sanitized)))
+            (intern sanitized (symbol-package sym))))
+      sym))
+
+(defun sanitize-scheme-ast (ast)
+  "Walk AST and sanitize all symbols to contain only valid QBE/C characters."
+  (cond
+    ((consp ast)   (mapcar #'sanitize-scheme-ast ast))
+    ((symbolp ast) (sanitize-symbol-name ast))
+    (t             ast)))
+
+(defun compile-scheme (ast &key (name nil) (build-dir "build") (trace nil))
+  "Run the full scheme pipeline on AST, returning a blub module."
+  (flet ((dump (label form)
+           (when (and trace name)
+             (let ((path (format nil "~a/~a.scheme-~a.lisp" build-dir name label)))
+               (ensure-directories-exist path)
+               (with-open-file (s path :direction :output :if-exists :supersede)
+                 (write-string (pp-blub form) s))
+               (format t ";; [trace] wrote ~a~%" path)))
+           form))
+    (let* ((ast-sanitized (sanitize-scheme-ast ast))
+           (globals (loop for form in (cdr ast-sanitized) ; ast-sanitized is (:module ...)
+                          when (and (consp form) (eq (car form) :define))
+                          collect (second form)))
+           (*scheme-globals* (fset:convert 'fset:set globals)))
+      (let* ((p0  (dump "pass0-box" (scheme-box-literals ast-sanitized)))
+             (p1  (dump "pass1-uniquify" (lower *scheme-1* p0)))
+             (p2b (dump "pass2b-box-rewrite" (lower *scheme-2b* p1)))
+             (p3a (dump "pass3a-free-vars" (lower *scheme-3a* p2b)))
+             (p3b (dump "pass3b-closure" (lower *scheme-3b* p3a)))
+             (p4  (dump "pass4-flatten-let" (lower *scheme-4* p3b)))
+             (p5  (dump "pass5-explicate" (lower *scheme-5* p4)))
+             (p6  (dump "pass6-flatten-statements" (lower *scheme-6* p5)))
+             (p6a (dump "pass6a-types" (lower *scheme-6a* p6)))
+             (p6b (dump "pass6b-primitives" (lower *scheme-6b* p6a)))
+             (p7  (dump "pass7-to-blub" (lower *scheme-to-blub* p6b))))
+        p7))))
+
+(defun build-scheme-ast (ast &key (name "scheme") (build-dir "build") runtime-c
+                                  (keep-temp-files t) (trace nil))
+  "Compile a scheme AST end-to-end to an executable: scheme -> blub -> qbe."
+  (build-blub-ast (compile-scheme ast :name name :build-dir build-dir :trace trace)
+                  :name name :build-dir build-dir
+                  :runtime-c runtime-c
+                  :keep-temp-files keep-temp-files
+                  :trace trace))
+
+(defun run-scheme-examples (&key
+                               (examples-dir "examples/scheme")
+                               (build-dir    "build")
+                               (runtime-c    "scheme-runtime.c")
+                               (trace        nil))
+  "Build and run every *.lisp file under EXAMPLES-DIR.
+
+   Each file may contain:
+     - A comment '; expected exit code: N' — compared against the actual exit
+       code of the compiled binary.
+
+   Returns a list of result plists with keys :file :expected :actual :pass."
+  (let ((results '()))
+    (dolist (path (sort (uiop:directory-files
+                         (uiop:ensure-directory-pathname examples-dir)
+                         "*.lisp")
+                        #'string< :key #'namestring))
+      (let* ((base     (pathname-name path))
+             (src      (uiop:read-file-string path))
+             ;; Scrape "; expected exit code: N" from source text.
+             (expected (let ((pos (search "expected exit code:" src)))
+                         (when pos
+                           (parse-integer src
+                                          :start (+ pos (length "expected exit code:"))
+                                          :junk-allowed t))))
+             (exe      nil)
+             (actual   nil)
+             (errored  nil))
+        (format t "~%=== ~a ===~%" base)
+        (handler-case
+            (progn
+              (setf exe
+                    (build-scheme-ast
+                     (with-open-file (s path) (read s))
+                     :name base
+                     :build-dir build-dir
+                     :runtime-c runtime-c
+                     :keep-temp-files t
+                     :trace trace))
+              ;; Run the executable; capture exit code.
+              (setf actual
+                    (nth-value 2
+                      (uiop:run-program (list (format nil "./~a" exe))
+                                        :ignore-error-status t))))
+          (error (e)
+            (setf errored t)
+            (format t "Compilation/Run error: ~A~%" e)))
+        (let ((passed (and (not errored) (or (null expected) (= expected actual)))))
+          (if passed
+              (format t "  expected=~A  actual=~A  => PASS~%" expected actual)
+              (format t "  expected=~A  actual=~A  => FAIL~%" expected actual))
+          (push (list :file base :expected expected :actual actual :pass passed)
+                results))))
+    (let* ((passed-count (count-if (lambda (r) (getf r :pass)) results))
+           (total-count  (length results)))
+      (format t "~%--- ~D/~D Scheme examples passed ---~%" passed-count total-count)
+      results)))

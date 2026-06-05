@@ -3,7 +3,12 @@
 
 (defparameter *blub-grammar*
   '((:module
-     (repeat0 (option :function :global :block :defstruct)))
+     (repeat0 (option :function :extern :global :block :defstruct)))
+
+    ;; An extern declares a C-linkage function so blub can call it without
+    ;; emitting a definition. Like :function but with no body.
+    (:extern
+     :type (identifier) (repeat0 (option (list :type (identifier)) :varargs)))
 
     (:defstruct
       (identifier) (repeat0 (list :type (identifier))))
@@ -247,6 +252,10 @@
   ;; Struct definitions have no statements to desugar; pass through unchanged.
   (list* :defstruct name fields))
 
+(def-op *blub-0* (:extern type name &rest args)
+  ;; Externs have no body to desugar; pass through unchanged.
+  (list* :extern type name args))
+
 (def-op *blub-0* (:module &rest body)
   ;; Process each top-level item (functions, globals, standalone blocks, struct defs).
   (cons :module (mapcar #'recurse body)))
@@ -325,12 +334,17 @@
       (list :declare type new-name))))
 
 (def-op *blub-1* (:set lhs value)
-  (if (symbolp lhs)
+  (cond
     ;; Variable assignment: rename the variable.
-    (list :set (lookup-or-error lhs "set") (recurse value))
+    ((symbolp lhs)
+     (list :set (lookup-or-error lhs "set") (recurse value)))
+    ;; Pointer store: (:set (:deref ptr-expr) value).
+    ((eq (car lhs) :deref)
+     (list :set (list :deref (recurse (cadr lhs))) (recurse value)))
     ;; Struct field assignment (:. struct-expr field-name): recurse into struct-expr.
-    (destructuring-bind (dot struct-expr field-name) lhs
-      (list :set (list dot (recurse struct-expr) field-name) (recurse value)))))
+    (t
+     (destructuring-bind (dot struct-expr field-name) lhs
+       (list :set (list dot (recurse struct-expr) field-name) (recurse value))))))
 
 (def-op *blub-1* (:var name)
   (list :var (lookup-or-error name "read")))
@@ -368,6 +382,10 @@
 (def-op *blub-1* (:defstruct name &rest fields)
   ;; Struct definitions have no variable names; pass through unchanged.
   (list* :defstruct name fields))
+
+(def-op *blub-1* (:extern type name &rest args)
+  ;; Externs have no scope; pass through unchanged.
+  (list* :extern type name args))
 
 (def-op *blub-1* (:module &rest body)
   ;; Fresh empty map at module scope. Globals are processed first so
@@ -550,15 +568,16 @@
 (defun tc-compatible-p (t1 t2)
   "True when T1 and T2 are assignment/comparison-compatible.
    8/32-bit integer types are mutually compatible (all map to QBE :w).
-   Any 8/32-bit integer is also compatible with 64-bit integers (implicit widening).
-   64-bit integers are mutually compatible with each other.
+   8/32-bit and 64-bit integers are mutually compatible in either direction:
+   32→64 widens, 64→32 truncates (C-style; caller's responsibility).
    :f32, :f64, :pointer, and :fn require exact kind match."
   (let ((k1 (blub-type-inner t1)) (k2 (blub-type-inner t2))
         (w32 '(:u8 :i8 :u32 :i32))
         (w64 '(:u64 :i64)))
     (or (and (member k1 w32) (member k2 w32))   ; both 32-bit (or smaller)
         (and (member k1 w64) (member k2 w64))   ; both 64-bit
-        (and (member k1 w32) (member k2 w64))   ; implicit widening 32→64
+        (and (member k1 w32) (member k2 w64))   ; widen 32→64
+        (and (member k1 w64) (member k2 w32))   ; truncate 64→32
         (eq k1 k2))))
 
 ;; --- Expression lowering helper ---
@@ -584,6 +603,16 @@
           (if gfound gtype
               (error "typecheck: variable ~A used before declaration" name))))))
 
+(defun tc-promote-types (t1 t2)
+  "Perform usual arithmetic promotions/conversions for binary operators on T1 and T2."
+  (let ((k1 (blub-type-inner t1))
+        (k2 (blub-type-inner t2))
+        (w64 '(:u64 :i64)))
+    (cond
+      ((member k1 w64) t1)
+      ((member k2 w64) t2)
+      (t t1))))
+
 ;; --- Binary operator helper ---
 
 (defun tc-check-binop (op left right required-pred pred-name result-type-fn)
@@ -599,7 +628,7 @@
       (error "typecheck: ~A right operand has type ~S, expected ~A" op rt pred-name))
     (unless (tc-compatible-p lt rt)
       (error "typecheck: ~A operands have incompatible types ~S and ~S" op lt rt))
-    (list :typed (funcall result-type-fn lt) (list op l r))))
+    (list :typed (funcall result-type-fn lt rt) (list op l r))))
 
 ;; --- Pass 3: expression handlers ---
 
@@ -625,27 +654,27 @@
   (list :typed type (list :vaarg name type)))
 
 ;; Arithmetic/bitwise binary operators.
-(def-op *blub-3* (:add  l r) (tc-check-binop :add  l r #'tc-numeric-p  "numeric"          #'identity))
-(def-op *blub-3* (:sub  l r) (tc-check-binop :sub  l r #'tc-numeric-p  "numeric"          #'identity))
-(def-op *blub-3* (:mul  l r) (tc-check-binop :mul  l r #'tc-numeric-p  "numeric"          #'identity))
-(def-op *blub-3* (:div  l r) (tc-check-binop :div  l r #'tc-numeric-p  "numeric"          #'identity))
-(def-op *blub-3* (:and  l r) (tc-check-binop :and  l r #'tc-int-like-p "integer" #'identity))
-(def-op *blub-3* (:or   l r) (tc-check-binop :or   l r #'tc-int-like-p "integer" #'identity))
-(def-op *blub-3* (:xor  l r) (tc-check-binop :xor  l r #'tc-int-like-p "integer" #'identity))
-(def-op *blub-3* (:shl  l r) (tc-check-binop :shl  l r #'tc-int-like-p "integer" #'identity))
-(def-op *blub-3* (:shr  l r) (tc-check-binop :shr  l r #'tc-int-like-p "integer" #'identity))
+(def-op *blub-3* (:add  l r) (tc-check-binop :add  l r #'tc-numeric-p  "numeric"          #'tc-promote-types))
+(def-op *blub-3* (:sub  l r) (tc-check-binop :sub  l r #'tc-numeric-p  "numeric"          #'tc-promote-types))
+(def-op *blub-3* (:mul  l r) (tc-check-binop :mul  l r #'tc-numeric-p  "numeric"          #'tc-promote-types))
+(def-op *blub-3* (:div  l r) (tc-check-binop :div  l r #'tc-numeric-p  "numeric"          #'tc-promote-types))
+(def-op *blub-3* (:and  l r) (tc-check-binop :and  l r #'tc-int-like-p "integer"          #'tc-promote-types))
+(def-op *blub-3* (:or   l r) (tc-check-binop :or   l r #'tc-int-like-p "integer"          #'tc-promote-types))
+(def-op *blub-3* (:xor  l r) (tc-check-binop :xor  l r #'tc-int-like-p "integer"          #'tc-promote-types))
+(def-op *blub-3* (:shl  l r) (tc-check-binop :shl  l r #'tc-int-like-p "integer"          (lambda (lt rt) (declare (ignore rt)) lt)))
+(def-op *blub-3* (:shr  l r) (tc-check-binop :shr  l r #'tc-int-like-p "integer"          (lambda (lt rt) (declare (ignore rt)) lt)))
 
 ;; Comparison operators: operands numeric, result is always :i32 (0 or 1).
-(def-op *blub-3* (:eq   l r) (tc-check-binop :eq   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
-(def-op *blub-3* (:ne   l r) (tc-check-binop :ne   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
-(def-op *blub-3* (:lt   l r) (tc-check-binop :lt   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
-(def-op *blub-3* (:le   l r) (tc-check-binop :le   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
-(def-op *blub-3* (:gt   l r) (tc-check-binop :gt   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
-(def-op *blub-3* (:ge   l r) (tc-check-binop :ge   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
+(def-op *blub-3* (:eq   l r) (tc-check-binop :eq   l r #'tc-numeric-p  "numeric" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
+(def-op *blub-3* (:ne   l r) (tc-check-binop :ne   l r #'tc-numeric-p  "numeric" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
+(def-op *blub-3* (:lt   l r) (tc-check-binop :lt   l r #'tc-numeric-p  "numeric" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
+(def-op *blub-3* (:le   l r) (tc-check-binop :le   l r #'tc-numeric-p  "numeric" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
+(def-op *blub-3* (:gt   l r) (tc-check-binop :gt   l r #'tc-numeric-p  "numeric" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
+(def-op *blub-3* (:ge   l r) (tc-check-binop :ge   l r #'tc-numeric-p  "numeric" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
 
 ;; Logical operators: int-like operands, result is :i32 (0 or 1), short-circuit in codegen.
-(def-op *blub-3* (:logand l r) (tc-check-binop :logand l r #'tc-int-like-p "integer" (constantly '(:type :i32))))
-(def-op *blub-3* (:logor  l r) (tc-check-binop :logor  l r #'tc-int-like-p "integer" (constantly '(:type :i32))))
+(def-op *blub-3* (:logand l r) (tc-check-binop :logand l r #'tc-int-like-p "integer" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
+(def-op *blub-3* (:logor  l r) (tc-check-binop :logor  l r #'tc-int-like-p "integer" (lambda (lt rt) (declare (ignore lt rt)) '(:type :i32))))
 
 (def-op *blub-3* (:not operand)
   (let* ((v  (tc-lower-expr operand))
@@ -797,18 +826,36 @@
   (list :declare type name))
 
 (def-op *blub-3* (:set lhs value)
-  ;; Unified assignment: LHS is either a variable name or a struct field lvalue.
-  (if (symbolp lhs)
+  ;; Unified assignment: LHS is a variable name, a pointer store, or a struct
+  ;; field lvalue.
+  (cond
     ;; Variable assignment.
-    (let* ((v  (tc-lower-expr value))
-           (vt (blub-type-of v))
-           (nt (tc-lookup-var-type lhs)))
-      (when (and vt (not (tc-compatible-p vt nt)))
-        (error "typecheck: :set ~S: value type ~S incompatible with declared type ~S"
-               lhs vt nt))
-      (list :set lhs v))
+    ((symbolp lhs)
+     (let* ((v  (tc-lower-expr value))
+            (vt (blub-type-of v))
+            (nt (tc-lookup-var-type lhs)))
+       (when (and vt (not (tc-compatible-p vt nt)))
+         (error "typecheck: :set ~S: value type ~S incompatible with declared type ~S"
+                lhs vt nt))
+       (list :set lhs v)))
+    ;; Pointer store: (:set (:deref ptr) value).
+    ((eq (car lhs) :deref)
+     (let* ((p   (tc-lower-expr (cadr lhs)))
+            (pt  (blub-type-of p))
+            (pointee (and pt (consp pt) (eq (car pt) :type)
+                          (consp (cadr pt)) (eq (car (cadr pt)) :pointer)
+                          (cadr (cadr pt)))))
+       (unless pointee
+         (error "typecheck: :set :deref operand has type ~S, expected a pointer" pt))
+       (let* ((v  (tc-lower-expr value))
+              (vt (blub-type-of v)))
+         (when (and vt (not (tc-compatible-p vt pointee)))
+           (error "typecheck: :set :deref: value type ~S incompatible with pointee ~S"
+                  vt pointee))
+         (list :set (list :deref p) v))))
     ;; Struct field assignment: LHS is (:. struct-expr field-name).
-    (destructuring-bind (dot struct-expr field-name) lhs
+    (t
+     (destructuring-bind (dot struct-expr field-name) lhs
       (declare (ignore dot))
       (let* ((se     (tc-lower-expr struct-expr))
              (st     (blub-type-of se))
@@ -827,7 +874,7 @@
                   (error "typecheck: :set ~A.~A expects ~S, got ~S"
                          sname field-name ftype vt))
                 ;; Annotate LHS with offset and field-type for pass 5.
-                (list :set (list :. se field-name foffset ftype) v)))))))))
+                (list :set (list :. se field-name foffset ftype) v))))))))))
 
 (def-op *blub-3* (:block &rest body)
   ;; Recurse each statement for its side-effect checks.
@@ -893,6 +940,11 @@
   ;; Struct definition already resolved by pass 2; pass through.
   (list* :defstruct name size align fields))
 
+(def-op *blub-3* (:extern type name &rest args)
+  ;; Already registered in *tc-fn-sigs* by the :module pre-scan; nothing
+  ;; to typecheck per-form. Emit unchanged.
+  (list* :extern type name args))
+
 (def-op *blub-3* (:. struct-expr field-name)
   ;; Field access: typecheck base, look up field, annotate with type+offset.
   (let* ((se (tc-lower-expr struct-expr))
@@ -940,16 +992,20 @@
       ;; Pre-scan function signatures (always needed: mutual recursion).
       ;; Sig is (ret-type variadic-p . arg-types); the (:varargs) marker, if
       ;; any, must be the last formal and only sets variadic-p.
-      (dolist (decl items)
-        (when (and (consp decl) (eq (car decl) :function))
-          (let* ((fn-ret    (second decl))
-                 (fn-name   (third decl))
-                 (fn-args   (butlast (cdddr decl)))
-                 (variadic-p (and fn-args (eq (car (car (last fn-args))) :varargs)))
-                 (named-args (if variadic-p (butlast fn-args) fn-args)))
+      (flet ((sig-from-args (ret args)
+               (let* ((variadic-p (and args (eq (car (car (last args))) :varargs)))
+                      (named (if variadic-p (butlast args) args)))
+                 (list* ret variadic-p (mapcar #'car named)))))
+        (dolist (decl items)
+          (when (and (consp decl) (eq (car decl) :function))
             (setf *tc-fn-sigs*
-                  (fset:with *tc-fn-sigs* fn-name
-                             (list* fn-ret variadic-p (mapcar #'car named-args)))))))
+                  (fset:with *tc-fn-sigs* (third decl)
+                             (sig-from-args (second decl)
+                                            (butlast (cdddr decl))))))
+          (when (and (consp decl) (eq (car decl) :extern))
+            (setf *tc-fn-sigs*
+                  (fset:with *tc-fn-sigs* (third decl)
+                             (sig-from-args (second decl) (cdddr decl)))))))
       ;; Phase 2: typecheck every declaration, then store all envs in :meta.
       (let* ((processed (mapcar #'recurse items))
              (new-meta  (meta-set
@@ -1107,15 +1163,22 @@
   (list :declare type name))
 
 (def-op *blub-4* (:set lhs value)
-  ;; Unified assignment: simplify the RHS; atomize the struct expression for field LHS.
+  ;; Unified assignment: simplify the RHS; atomize the LHS sub-expression
+  ;; (struct base or pointer for stores).
   (let ((*p4-prefix* nil))
-    (if (symbolp lhs)
-      (p4-emit-stmt (list :set lhs (p4-simplify value)))
-      ;; Field lhs: (:. struct-expr field-name offset field-type) from pass 3.
-      (destructuring-bind (dot struct-expr field-name offset field-type) lhs
-        (p4-emit-stmt (list :set
-                            (list dot (p4-atomize struct-expr) field-name offset field-type)
-                            (p4-simplify value)))))))
+    (cond
+      ((symbolp lhs)
+       (p4-emit-stmt (list :set lhs (p4-simplify value))))
+      ((eq (car lhs) :deref)
+       (p4-emit-stmt (list :set
+                           (list :deref (p4-atomize (cadr lhs)))
+                           (p4-simplify value))))
+      (t
+       ;; Field lhs: (:. struct-expr field-name offset field-type) from pass 3.
+       (destructuring-bind (dot struct-expr field-name offset field-type) lhs
+         (p4-emit-stmt (list :set
+                             (list dot (p4-atomize struct-expr) field-name offset field-type)
+                             (p4-simplify value))))))))
 
 (def-op *blub-4* (:vastart name)
   ;; Pass-through; pass 5 emits the vastart instruction.
@@ -1155,6 +1218,10 @@
 (def-op *blub-4* (:defstruct name size align &rest fields)
   ;; Pass through unchanged; struct layout was resolved by pass 2.
   (list* :defstruct name size align fields))
+
+(def-op *blub-4* (:extern type name &rest args)
+  ;; Externs have no body to normalize; pass through.
+  (list* :extern type name args))
 
 (def-op *blub-4* (:module &rest body)
   ;; Pass :meta through unchanged; recurse all real items.
@@ -1530,9 +1597,11 @@
   "Lower a binary arithmetic/bitwise op, emitting a QBE :assign instruction.
    Returns the (:temp name) holding the result."
   (let* ((ltype (or (blub-type-of left) '(:type :i32)))
+         (rtype (or (blub-type-of right) '(:type :i32)))
+         (promoted (tc-promote-types ltype rtype))
          (lv    (b5-lower left))
          (rv    (b5-lower right))
-         (qbase (blub-type->qbe-base ltype))
+         (qbase (blub-type->qbe-base promoted))
          (qop   (blub-arith->qbe-op blub-op))
          (res   (b5-temp (string blub-op))))
     (b5-emit (list :assign (b5-wrap-temp res) qbase qop lv rv))
@@ -1559,9 +1628,11 @@
   "Lower a comparison op, emitting a QBE :assign instruction.
    Returns the (:temp name) holding 0 or 1."
   (let* ((ltype (or (blub-type-of left) '(:type :i32)))
+         (rtype (or (blub-type-of right) '(:type :i32)))
+         (promoted (tc-promote-types ltype rtype))
          (lv    (b5-lower left))
          (rv    (b5-lower right))
-         (qop   (blub-cmp->qbe-op blub-op ltype))
+         (qop   (blub-cmp->qbe-op blub-op promoted))
          (res   (b5-temp (string blub-op))))
     ;; QBE comparison instructions always produce :w (32-bit word).
     (b5-emit (list :assign (b5-wrap-temp res) :w qop lv rv))
@@ -1602,11 +1673,22 @@
     (b5-wrap-temp res)))
 
 (def-op *blub-5* (:not operand)
-  ;; Logical not: 1 if operand == 0, else 0.
-  (let* ((ov  (b5-lower operand))
-         (res (b5-temp "not")))
-    (b5-emit (list :assign (b5-wrap-temp res) :w :ceqw ov 0))
-    (b5-wrap-temp res)))
+  ;; Logical not: 1 if operand == 0, else 0. The comparison opcode and any
+  ;; required widening depend on the operand's QBE base type so that a :not
+  ;; on an :l value produces an :l-typed result (matching the IR's :typed
+  ;; annotation through the pipeline).
+  (let* ((otype (or (blub-type-of operand) '(:type :i32)))
+         (qbase (blub-type->qbe-base otype))
+         (ov    (b5-lower operand))
+         (qop   (if (eq qbase :l) :ceql :ceqw))
+         (res-w (b5-temp "not")))
+    (b5-emit (list :assign (b5-wrap-temp res-w) :w qop ov 0))
+    (cond
+      ((eq qbase :l)
+       (let ((res-l (b5-temp "notl")))
+         (b5-emit (list :assign (b5-wrap-temp res-l) :l :extuw (b5-wrap-temp res-w)))
+         (b5-wrap-temp res-l)))
+      (t (b5-wrap-temp res-w)))))
 
 (def-op *blub-5* (:logand left right)
   ;; Short-circuit AND: right evaluated only if left is non-zero.
@@ -1711,11 +1793,16 @@
          (dst-qbe  (blub-type->qbe-base dst-type)))
     (if (eq src-qbe dst-qbe)
       src-val   ; same QBE representation — no instruction needed
-      (let ((result (b5-temp "cast"))
-            (op     (b5-cast-op (blub-type-inner src-type)
-                                (blub-type-inner dst-type)
-                                src-qbe dst-qbe)))
-        (b5-emit (list :assign (b5-wrap-temp result) dst-qbe op src-val))
+      (let* ((src-temp (if (numberp src-val)
+                           (let ((tmp (b5-temp "castsrc")))
+                             (b5-emit (list :assign (b5-wrap-temp tmp) src-qbe :copy src-val))
+                             (b5-wrap-temp tmp))
+                           src-val))
+             (result (b5-temp "cast"))
+             (op     (b5-cast-op (blub-type-inner src-type)
+                                 (blub-type-inner dst-type)
+                                 src-qbe dst-qbe)))
+        (b5-emit (list :assign (b5-wrap-temp result) dst-qbe op src-temp))
         (b5-wrap-temp result)))))
 
 (def-op *blub-5* (:fn-ptr name)
@@ -1783,23 +1870,35 @@
   nil)
 
 (def-op *blub-5* (:set lhs value)
-  ;; Unified assignment: variable store or struct field store.
-  (if (symbolp lhs)
+  ;; Unified assignment: variable store, pointer store, or struct field store.
+  (cond
     ;; Variable store.
-    (let ((qval (b5-lower value)))
-      (b5-store-var lhs qval))
+    ((symbolp lhs)
+     (b5-store-var lhs (b5-lower value)))
+    ;; Pointer store: lhs is (:deref typed-ptr-expr) from pass 3.
+    ((eq (car lhs) :deref)
+     (let* ((ptr-expr (cadr lhs))
+            ;; Derive pointee type from the typed wrapper around ptr-expr.
+            (ptr-type (or (blub-type-of ptr-expr)
+                          '(:type (:pointer (:type :i32)))))
+            (pointee  (cadr (cadr ptr-type)))
+            (ptr-val  (b5-lower ptr-expr))
+            (qval     (b5-lower value))
+            (store-op (blub-type->store-op pointee)))
+       (b5-emit (list :instr store-op qval ptr-val))))
     ;; Field store: lhs is (:. struct-expr field-name offset field-type) from pass 3.
-    (destructuring-bind (dot struct-expr field-name offset field-type) lhs
-      (declare (ignore dot field-name))
-      (let* ((struct-addr (b5-get-struct-addr struct-expr))
-             (field-ptr   (if (zerop offset)
-                            struct-addr
-                            (let ((tmp (b5-temp "fptr")))
-                              (b5-emit (list :assign (b5-wrap-temp tmp) :l :add struct-addr offset))
-                              (b5-wrap-temp tmp))))
-             (qval        (b5-lower value))
-             (store-op    (blub-type->store-op field-type)))
-        (b5-emit (list :instr store-op qval field-ptr)))))
+    (t
+     (destructuring-bind (dot struct-expr field-name offset field-type) lhs
+       (declare (ignore dot field-name))
+       (let* ((struct-addr (b5-get-struct-addr struct-expr))
+              (field-ptr   (if (zerop offset)
+                             struct-addr
+                             (let ((tmp (b5-temp "fptr")))
+                               (b5-emit (list :assign (b5-wrap-temp tmp) :l :add struct-addr offset))
+                               (b5-wrap-temp tmp))))
+              (qval        (b5-lower value))
+              (store-op    (blub-type->store-op field-type)))
+         (b5-emit (list :instr store-op qval field-ptr))))))
   nil)
 
 ;; Internal IR form emitted by pass 4's p4-atomize for fresh temporaries.
@@ -1990,7 +2089,11 @@
              (other-forms  (filter items (lambda (n)
                                            (and (consp n)
                                                 (not (eq (car n) :defstruct))
-                                                (not (eq (car n) :global))))))
+                                                (not (eq (car n) :global))
+                                                ;; Externs are link-time only;
+                                                ;; QBE doesn't need a forward
+                                                ;; declaration for them.
+                                                (not (eq (car n) :extern))))))
              ;; Build QBE type defs and populate *b5-struct-env*.
              (qbe-types
                (if (meta-get meta :struct-env)
