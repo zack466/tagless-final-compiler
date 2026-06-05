@@ -73,7 +73,7 @@
        ;; Unary
        :neg :not :deref :addr-of
        ;; Bitwise / arithmetic binary
-       :add :sub :mul :div :and :or :xor
+       :add :sub :mul :div :and :or :xor :shl :shr
        ;; Comparison
        :eq :ne :lt :le :gt :ge
        ;; Logical
@@ -109,7 +109,6 @@
     (:addr-of  :expr)
 
     ;; Binary arithmetic / bitwise.
-    ;;TODO: implement shl, shr
     (:add      :expr :expr)
     (:sub      :expr :expr)
     (:mul      :expr :expr)
@@ -599,6 +598,8 @@
 (def-op *blub-3* (:and  l r) (tc-check-binop :and  l r #'tc-int-like-p "integer" #'identity))
 (def-op *blub-3* (:or   l r) (tc-check-binop :or   l r #'tc-int-like-p "integer" #'identity))
 (def-op *blub-3* (:xor  l r) (tc-check-binop :xor  l r #'tc-int-like-p "integer" #'identity))
+(def-op *blub-3* (:shl  l r) (tc-check-binop :shl  l r #'tc-int-like-p "integer" #'identity))
+(def-op *blub-3* (:shr  l r) (tc-check-binop :shr  l r #'tc-int-like-p "integer" #'identity))
 
 ;; Comparison operators: operands numeric, result is always :i32 (0 or 1).
 (def-op *blub-3* (:eq   l r) (tc-check-binop :eq   l r #'tc-numeric-p  "numeric" (constantly '(:type :i32))))
@@ -957,7 +958,7 @@
     ((and (consp inner) (eq (car inner) :var)) inner)
     ;; Binary arithmetic/comparison ops: atomize both operands.
     ((and (consp inner)
-          (member (car inner) '(:add :sub :mul :div :and :or :xor
+          (member (car inner) '(:add :sub :mul :div :and :or :xor :shl :shr
                                 :eq :ne :lt :le :gt :ge)))
      (list (car inner)
            (p4-atomize (cadr  inner))
@@ -1188,6 +1189,7 @@
   (case blub-op
     (:add :add) (:sub :sub) (:mul :mul) (:div :div)
     (:and :and) (:or  :or)  (:xor :xor)
+    (:shl :shl) (:shr :shr)
     (t (error "blub-arith->qbe-op: unknown op ~S" blub-op))))
 
 (defun blub-cmp->qbe-op (blub-op type)
@@ -1439,6 +1441,23 @@
     (b5-emit (list :assign (b5-wrap-temp res) qbase qop lv rv))
     (b5-wrap-temp res)))
 
+(defun b5-lower-shift (blub-op left right)
+  "Lower :shl/:shr. QBE requires the shift amount to be word-sized regardless
+   of the left operand's type, so when ltype lowers to :l we truncate right to :w."
+  (let* ((ltype (or (blub-type-of left) '(:type :i32)))
+         (lv    (b5-lower left))
+         (rv    (b5-lower right))
+         (qbase (blub-type->qbe-base ltype))
+         (rv-w  (if (eq qbase :l)
+                  (let ((tmp (b5-temp "shamt")))
+                    (b5-emit (list :assign (b5-wrap-temp tmp) :w :copy rv))
+                    (b5-wrap-temp tmp))
+                  rv))
+         (qop   (blub-arith->qbe-op blub-op))
+         (res   (b5-temp (string blub-op))))
+    (b5-emit (list :assign (b5-wrap-temp res) qbase qop lv rv-w))
+    (b5-wrap-temp res)))
+
 (defun b5-lower-cmpop (blub-op left right)
   "Lower a comparison op, emitting a QBE :assign instruction.
    Returns the (:temp name) holding 0 or 1."
@@ -1465,6 +1484,8 @@
 (def-op *blub-5* (:and  left right) (b5-lower-binop :and  left right))
 (def-op *blub-5* (:or   left right) (b5-lower-binop :or   left right))
 (def-op *blub-5* (:xor  left right) (b5-lower-binop :xor  left right))
+(def-op *blub-5* (:shl  left right) (b5-lower-shift :shl  left right))
+(def-op *blub-5* (:shr  left right) (b5-lower-shift :shr  left right))
 
 ;; Comparison operators (result: (:temp t) holding 0 or 1)
 (def-op *blub-5* (:eq   left right) (b5-lower-cmpop :eq   left right))

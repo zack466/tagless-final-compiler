@@ -204,7 +204,7 @@
 ;; Validation helpers
 ;;
 ;; Each helper takes an EXPRESSION argument used purely to attach source
-;; location info to errors. Pass (expr) inside a def-op body, or the
+;; location info to errors. Pass (this) inside a def-op body, or the
 ;; specific sub-cons that's wrong if you have one.
 ;; -----------------------------------------------------------------------------
 
@@ -353,17 +353,17 @@
           (mapcar #'recurse blocks)))
 
 (def-op *qbe* (:field type &optional count)
-  (check-ext-type type (expr) ":field")
+  (check-ext-type type (this) ":field")
   (if count
       (format nil "~(~a~) ~a" type count)
       (format nil "~(~a~)" type)))
 
 (def-op *qbe* (:data-item type &rest vals)
-  (check-ext-type type (expr) ":data-item")
+  (check-ext-type type (this) ":data-item")
   (if (eq type :z)
       (progn
         (unless (= (length vals) 1)
-          (qbe-error (expr)
+          (qbe-error (this)
                      ":z data-item takes exactly one size argument; got ~D."
                      (length vals)))
         (format nil "z ~a" (first vals)))
@@ -372,7 +372,7 @@
 (def-op *qbe* (:param type &optional name)
   (cond ((eq type :...) "...")
         ((eq type :env) (format nil "env ~a" (recurse name)))
-        (t (check-abity type (expr) ":param")
+        (t (check-abity type (this) ":param")
            (if (qbe-aggregate-type-p type)
                (format nil "~a ~a" (recurse type) (recurse name))
                (format nil "~(~a~) ~a" type (recurse name))))))
@@ -398,19 +398,19 @@
 ;; --- Instructions ---
 
 (def-op *qbe* (:assign var type op &rest args)
-  (check-base-type type (expr) ":assign")
-  (check-assign-opcode op (expr))
+  (check-base-type type (this) ":assign")
+  (check-assign-opcode op (this))
   (format nil "~a =~(~a~) ~(~a~) ~{~a~^, ~}"
           (recurse var) type op (mapcar #'recurse args)))
 
 (def-op *qbe* (:instr op &rest args)
-  (check-effect-opcode op (expr))
+  (check-effect-opcode op (this))
   (format nil "~(~a~) ~{~a~^, ~}" op (mapcar #'recurse args)))
 
 ;; --- Calls ---
 
 (def-op *qbe* (:call-assign var type target &rest args)
-  (check-abity type (expr) ":call-assign return type")
+  (check-abity type (this) ":call-assign return type")
   (if (qbe-aggregate-type-p type)
       (format nil "~a =~a call ~a(~{~a~^, ~})"
               (recurse var) (recurse type) (recurse target)
@@ -422,7 +422,7 @@
 (def-op *qbe* (:call-arg type val)
   (cond ((eq type :...) "...")
         ((eq type :env) (format nil "env ~a" (recurse val)))
-        (t (check-abity type (expr) ":call-arg")
+        (t (check-abity type (this) ":call-arg")
            (if (qbe-aggregate-type-p type)
                (format nil "~a ~a" (recurse type) (recurse val))
                (format nil "~(~a~) ~a" type (recurse val))))))
@@ -434,9 +434,9 @@
 ;; --- Phi ---
 
 (def-op *qbe* (:phi var type &rest args)
-  (check-base-type type (expr) ":phi")
+  (check-base-type type (this) ":phi")
   (when (oddp (length args))
-    (qbe-error (expr)
+    (qbe-error (this)
                ":phi expects pairs of (label value); got ~D arguments."
                (length args)))
   (let ((pairs (loop for (lbl val) on args by #'cddr

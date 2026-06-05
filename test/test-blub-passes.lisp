@@ -290,6 +290,43 @@
                             all-instrs)))
     (deftest "pass-5: :add instruction emitted" (check-true add-instr))))
 
+;; shl/shr lower to QBE :shl/:shr instructions.
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 ((:type :i32) a) ((:type :i32) b)
+                 (:block (:return (:shl (:var a) (:var b)))))))
+       (qbe        (compile-blub prog))
+       (fn         (second qbe))
+       (all-instrs (mapcan (lambda (b) (copy-list (cdr b)))
+                           (cddr (cddr fn))))
+       (shl-instr  (find-if (lambda (i)
+                              (and (consp i) (eq (car i) :assign)
+                                   (eq (fourth i) :shl)))
+                            all-instrs)))
+  (deftest "pass-5: :shl instruction emitted" (check-true shl-instr)))
+
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 ((:type :i32) a) ((:type :i32) b)
+                 (:block (:return (:shr (:var a) (:var b)))))))
+       (qbe        (compile-blub prog))
+       (fn         (second qbe))
+       (all-instrs (mapcan (lambda (b) (copy-list (cdr b)))
+                           (cddr (cddr fn))))
+       (shr-instr  (find-if (lambda (i)
+                              (and (consp i) (eq (car i) :assign)
+                                   (eq (fourth i) :shr)))
+                            all-instrs)))
+  (deftest "pass-5: :shr instruction emitted" (check-true shr-instr)))
+
+;; Typechecker rejects shifts on non-integer operands.
+(let* ((prog '(:module
+               (:function (:type :i32) f
+                 (:block (:return (:shl 1.0 2))))))
+       (result (handler-case (compile-blub prog)
+                 (error (e) (declare (ignore e)) :error))))
+  (deftest "pass-3: :shl on float operand caught" (check result :error)))
+
 ;;; ==========================================================================
 ;;; Pass 5: If statement
 ;;; ==========================================================================
