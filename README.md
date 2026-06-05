@@ -1,5 +1,7 @@
 # A Tagless Final Compiler
 
+See [report.md](./report.md) for the final project report.
+
 ## Building
 
 I apologize in advance for using git submodules.

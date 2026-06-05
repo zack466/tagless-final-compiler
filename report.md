@@ -582,3 +582,9 @@ I think optimizations are especially key to implementing more complicated progra
 I'm especially inspired by Haskell, which performs most of its optimizations on a typed-lambda-calculus-based IR and is able to generate very fast code even though the language is so high-level.
 And I'm also interested in projects like OxCaml and Coalton, which are intended to squeeze as much performance as possible out high-level languages (OCaml and Common Lisp, respectively).
 I want to see what types of IRs they use and how they achieve their high performance, and implement similar compiler passes in this project.
+
+I think I can also try to work on quality-of-life features which take advantage of the tagless-final aspect of this compiler.
+For example, I can write interpreters which actually interpret my languages within Common Lisp and use this as a reference when checking the behavior of each compiler pass, since the results should be the same.
+Furthermore, I can easily add a parsing frontend and a pretty-printed backend for each of my languages so that I can program in each language in their original syntax, lowering the bar for writing tests, standard library functions, etc.
+I also wanted there to be a sort of meta-programming aspect to this compiler so I can essentially get free macros in any of my languages.
+I'm not sure how useful that would actually be, but I think it would be interesting at the very least to have a sort of meta-programmed compiler language which can compile itself.

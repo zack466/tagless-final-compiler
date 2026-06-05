@@ -20,6 +20,10 @@ examples:
 		--eval '(in-package #:tagless-compiler)' \
 		--eval '(run-blub-examples :trace t)' \
 		--eval '(sb-ext:exit)'
+	rlwrap sbcl --load dev.lisp \
+		--eval '(in-package #:tagless-compiler)' \
+		--eval '(run-scheme-examples :trace t)' \
+		--eval '(sb-ext:exit)'
 
 clean:
 	rm src/*.fasl
